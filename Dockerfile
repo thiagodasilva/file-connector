@@ -2,7 +2,7 @@
 FROM pico-swiftstack:latest
 
 MAINTAINER Thiago da Silva <thiago@swiftstack.com>
-#WORKDIR /root
+
 ARG FILE_CONNECTOR_DIR=.
 COPY install_scripts /install_scripts
 COPY $FILE_CONNECTOR_DIR/setup.py /opt/src/setup.py
@@ -15,7 +15,5 @@ RUN /install_scripts/install_prereqs.sh && \
 # Replace openstack swift conf files with local file-connector ones
 COPY configs/swift/* /etc/swift/
 COPY configs/rootfs /
-
-VOLUME /srv/fileconnector
 
 ENTRYPOINT ["/init"]
