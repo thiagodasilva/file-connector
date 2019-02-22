@@ -34,7 +34,7 @@ from swift.common import constraints
 class ContainerController(server.ContainerController):
     """
     Subclass of the container server's ContainerController which replaces the
-    _get_container_broker() method so that we can use the Nas Connector's
+    _get_container_broker() method so that we can use the File Connector's
     DiskDir duck-type of the container DatabaseBroker object, and make the
     account_update() method a no-op (information is simply stored on disk and
     already updated by virtue of performaing the file system operations
@@ -77,7 +77,7 @@ class ContainerController(server.ContainerController):
         try:
             return server.ContainerController.PUT(self, req)
         except DiskFileNoSpace:
-            # As container==directory in the Nas connector, we might run outi
+            # As container==directory in the File connector, we might run outi
             # of space or exceed quota when creating containers.
             drive = req.split_path(1, 1, True)
             return HTTPInsufficientStorage(drive=drive, request=req)

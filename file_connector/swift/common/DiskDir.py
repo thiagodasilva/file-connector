@@ -30,7 +30,7 @@ from file_connector.swift.common.utils import validate_account, validate_contain
     _implicit_dir_objects, ThreadPool
 from swift.common import manager
 from file_connector.swift.common.exceptions import FileOrDirNotFoundError, \
-    NasConnectorFileSystemIOError
+    FileConnectorFileSystemIOError
 from swift.common.constraints import MAX_META_COUNT, MAX_META_OVERALL_SIZE
 from swift.common.swob import HTTPBadRequest
 
@@ -194,7 +194,7 @@ class DiskCommon(object):
         if self._dir_exists:
             try:
                 self.metadata = _read_metadata(self.datadir)
-            except NasConnectorFileSystemIOError as err:
+            except FileConnectorFileSystemIOError as err:
                 if err.errno in (errno.ENOENT, errno.ESTALE):
                     return False
                 raise
@@ -281,7 +281,7 @@ class DiskDir(DiskCommon):
                 .delete_object()
             else:
                 if not .empty()
-                    # Nas Connector's definition of empty should mean only
+                    # File Connector's definition of empty should mean only
                     # sub-directories exist in Object-Only mode
                     return conflict
                 .get_info()['put_timestamp'] and not .is_deleted()
@@ -485,7 +485,7 @@ class DiskDir(DiskCommon):
             obj_path = os.path.join(self.datadir, obj)
             try:
                 metadata = read_metadata(obj_path)
-            except NasConnectorFileSystemIOError as err:
+            except FileConnectorFileSystemIOError as err:
                 if err.errno in (errno.ENOENT, errno.ESTALE):
                     # obj might have been deleted by another process
                     # since the objects list was originally built

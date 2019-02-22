@@ -20,7 +20,7 @@ from swift.common.utils import get_logger
 FILE_CONNECTOR_DEFAULT_ACCT = 'fileconnector'
 
 
-class NasConnectAuth(object):
+class FileConnectAuth(object):
     def __init__(self, app, conf):
         self.app = app
         self.conf = conf
@@ -66,5 +66,5 @@ def filter_factory(global_conf, **local_conf):
     conf.update(local_conf)
 
     def auth_filter(app):
-        return NasConnectAuth(app, conf)
+        return FileConnectAuth(app, conf)
     return auth_filter

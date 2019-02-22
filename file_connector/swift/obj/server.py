@@ -29,10 +29,10 @@ from file_connector.swift.common.exceptions import AlreadyExistsAsFile, \
     AlreadyExistsAsDir
 
 
-class NasConnectorDiskFileRouter(object):
+class FileConnectorDiskFileRouter(object):
     """
     Replacement for Swift's DiskFileRouter object.
-    Always returns Nas Connector's DiskFileManager implementation.
+    Always returns File Connector's DiskFileManager implementation.
     """
     def __init__(self, *args, **kwargs):
         self.manager_cls = DiskFileManager(*args, **kwargs)
@@ -57,7 +57,7 @@ class ObjectController(server.ObjectController):
         :param conf: WSGI configuration parameter
         """
         # Replaces Swift's DiskFileRouter object reference with ours.
-        self._diskfile_router = NasConnectorDiskFileRouter(conf, self.logger)
+        self._diskfile_router = FileConnectorDiskFileRouter(conf, self.logger)
         self.devices = conf.get('devices', '/srv')
         self.swift_dir = conf.get('swift_dir', '/etc/swift')
         self.object_ring = self.get_object_ring()
@@ -159,7 +159,7 @@ class ObjectController(server.ObjectController):
         Object Server.  This is used by the object replicator to get hashes
         for directories.
 
-        Nas Connector does not support this as it expects the underlying
+        File Connector does not support this as it expects the underlying
         Shared filesystem to take care of data durability
         """
         return HTTPNotImplemented(request=request)
