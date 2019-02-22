@@ -38,9 +38,9 @@ setup(
         'Programming Language :: Python :: 2.7'
     ],
     install_requires=[],
-    scripts=[
-        'bin/fileconnector-gen-builders',
-    ],
+    #scripts=[
+    #    'bin/fileconnector-gen-builders',
+    #],
     entry_points={
         'paste.app_factory': [
             'proxy=file_connector.swift.proxy.server:app_factory',
