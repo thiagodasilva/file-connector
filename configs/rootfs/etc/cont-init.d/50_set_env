@@ -1,0 +1,3 @@
+#!/usr/bin/with-contenv sh
+
+crudini --set /etc/swift/proxy-server.conf filter:tempauth user_fileconnector_fcuser "$FILE_CONNECTOR_SECRET .admin .reseller_admin"

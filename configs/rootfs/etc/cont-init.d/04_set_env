@@ -1,3 +1,0 @@
-#!/usr/bin/with-contenv sh
-
-echo "export FILE_CONNECTOR_SECRET=$FILE_CONNECTOR_SECRET" >> $HOME/.shrc

@@ -9,8 +9,8 @@ COPY $FILE_CONNECTOR_DIR/setup.py /opt/src/setup.py
 COPY $FILE_CONNECTOR_DIR/requirements.txt /opt/src/requirements.txt
 COPY $FILE_CONNECTOR_DIR/file_connector/ /opt/src/file_connector
 
-RUN apk --no-cache add bash
-RUN /install_scripts/fileconnector_install_pico.sh
+RUN /install_scripts/install_prereqs.sh && \
+    /install_scripts/fileconnector_install.sh
 
 # Replace openstack swift conf files with local file-connector ones
 COPY configs/swift/* /etc/swift/
