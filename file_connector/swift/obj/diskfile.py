@@ -241,11 +241,29 @@ class DiskFileWriter(object):
 
 
     """
-    def __init__(self, obj, datadir, size, disk_file):
+    def __init__(self, obj, obj_path, datadir, size, disk_file):
+        """
+        DiskFileWriter constructor
+
+        :param obj: This is the 'basename' of the object name. This is
+                    the name that will be written as a file on the filesystem
+                    In the example: '/dev/acc/cont/foo/bar/baz', obj is baz
+        :param obj_path: This is the 'dirname' of the object name. The
+                    directory tree that is part of the object name, not
+                    containinig the acount and container.
+                    In the example: '/dev/acc/cont/foo/bar/baz', obj_path is
+                    'foo/bar'
+        :param datadir: The entire directory structure up to obj. In the
+                        example: '/dev/acc/cont/foo/bar/baz', datadir is
+                        '/dev/acc/cont/foo/bar'.
+        :param size: size of object
+        :param disk_file: the disk_file object
+        """
         # Parameter tracking
         self._fd = None
         self._tmppath = None
         self._obj = obj
+        self._obj_path = obj_path
         self._put_datadir = datadir
         self._size = size
         self._disk_file = disk_file
@@ -461,7 +479,6 @@ class DiskFileWriter(object):
         """
         df = self._disk_file
         df._threadpool.run_in_thread(self._write_entire_chunk, chunk)
-        #return self._upload_size
 
     def _finalize_put(self, metadata):
         # Write out metadata before fsync() to ensure it is also forced to
@@ -510,12 +527,12 @@ class DiskFileWriter(object):
                                 self._tmppath, df._data_file))
                     else:
                         # Data file target name now has a bad path!
-                        dfstats = do_stat(df._put_datadir)
+                        dfstats = do_stat(self._put_datadir)
                         if not dfstats:
                             raise DiskFileError(
                                 'DiskFile.put(): path to object, %s, no'
                                 ' longer exists (targeted for %s)' % (
-                                    df._put_datadir, df._data_file))
+                                    self._put_datadir, df._data_file))
                         else:
                             if not stat.S_ISDIR(dfstats.st_mode):
                                 raise DiskFileError(
@@ -531,7 +548,7 @@ class DiskFileWriter(object):
                                     " stat('%s') following that succeeded:"
                                     " %r" % (
                                         self._tmppath, df._data_file, str(err),
-                                        df._put_datadir, dfstats))
+                                        self._put_datadir, dfstats))
                                 attempts += 1
                                 continue
                 else:
@@ -1031,7 +1048,8 @@ class DiskFile(object):
         return dr
 
     def writer(self, size=None):
-        return DiskFileWriter(self._obj, self._put_datadir, size, self)
+        return DiskFileWriter(self._obj, self._obj_path,
+                              self._put_datadir, size, self)
 
     @contextmanager
     def create(self, size=None):
