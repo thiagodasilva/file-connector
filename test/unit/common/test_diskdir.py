@@ -91,32 +91,39 @@ class TestDiskDirModuleFunctions(unittest.TestCase):
         out_objs = dd.filter_end_marker(in_objs, end_marker)
         assert list(out_objs) == []
 
-        in_objs, end_marker = ['abc_123', 'abc_456', 'abc_789', 'def_101'], 'ABC'
+        in_objs, end_marker = ['abc_123', 'abc_456',
+                               'abc_789', 'def_101'], 'ABC'
         out_objs = dd.filter_end_marker(in_objs, end_marker)
         assert list(out_objs) == []
 
-        in_objs, end_marker = ['abc_123', 'abc_456', 'abc_789', 'def_101'], 'efg'
+        in_objs, end_marker = ['abc_123', 'abc_456', 'abc_789',
+                               'def_101'], 'efg'
         out_objs = dd.filter_end_marker(in_objs, end_marker)
         assert list(out_objs) == ['abc_123', 'abc_456', 'abc_789', 'def_101']
 
         # Input not sorted, so we should only expect one name
-        in_objs, end_marker = ['abc_123', 'def_101', 'abc_456', 'abc_789'], 'abc_789'
+        in_objs, end_marker = ['abc_123', 'def_101', 'abc_456',
+                               'abc_789'], 'abc_789'
         out_objs = dd.filter_end_marker(in_objs, end_marker)
-        assert list(out_objs) == ['abc_123',]
+        assert list(out_objs) == ['abc_123', ]
 
-        in_objs, end_marker = ['abc_123', 'abc_456', 'abc_789', 'def_101'], 'abc_789'
-        out_objs = dd.filter_end_marker(in_objs, end_marker)
-        assert list(out_objs) == ['abc_123', 'abc_456']
-
-        in_objs, end_marker = ['abc_123', 'abc_456', 'abc_789', 'def_101'], 'abc_5'
+        in_objs, end_marker = ['abc_123', 'abc_456', 'abc_789',
+                               'def_101'], 'abc_789'
         out_objs = dd.filter_end_marker(in_objs, end_marker)
         assert list(out_objs) == ['abc_123', 'abc_456']
 
-        in_objs, end_marker = ['abc_123', 'abc_456', 'abc_789', 'def_101'], 'abc_123'
+        in_objs, end_marker = ['abc_123', 'abc_456', 'abc_789',
+                               'def_101'], 'abc_5'
+        out_objs = dd.filter_end_marker(in_objs, end_marker)
+        assert list(out_objs) == ['abc_123', 'abc_456']
+
+        in_objs, end_marker = ['abc_123', 'abc_456', 'abc_789',
+                               'def_101'], 'abc_123'
         out_objs = dd.filter_end_marker(in_objs, end_marker)
         assert list(out_objs) == []
 
-        in_objs, end_marker = ['abc_123', 'abc_456', 'abc_789', 'def_101'], 'def_101'
+        in_objs, end_marker = ['abc_123', 'abc_456', 'abc_789',
+                               'def_101'], 'def_101'
         out_objs = dd.filter_end_marker(in_objs, end_marker)
         assert list(out_objs) == ['abc_123', 'abc_456', 'abc_789']
 
@@ -142,11 +149,13 @@ class TestDiskDirModuleFunctions(unittest.TestCase):
         assert list(out_objs) == []
 
         # Input not sorted, so we should expect the names as listed
-        in_objs, marker = ['abc_123', 'def_101', 'abc_456', 'abc_789'], 'abc_456'
+        in_objs, marker = ['abc_123', 'def_101', 'abc_456',
+                           'abc_789'], 'abc_456'
         out_objs = dd.filter_marker(in_objs, marker)
         assert list(out_objs) == ['def_101', 'abc_789']
 
-        in_objs, marker = ['abc_123', 'abc_456', 'abc_789', 'def_101'], 'abc_456'
+        in_objs, marker = ['abc_123', 'abc_456', 'abc_789',
+                           'def_101'], 'abc_456'
         out_objs = dd.filter_marker(in_objs, marker)
         assert list(out_objs) == ['abc_789', 'def_101']
 
@@ -154,11 +163,13 @@ class TestDiskDirModuleFunctions(unittest.TestCase):
         out_objs = dd.filter_marker(in_objs, marker)
         assert list(out_objs) == ['abc_789', 'def_101']
 
-        in_objs, marker = ['abc_123', 'abc_456', 'abc_789', 'def_101'], 'abc_123'
+        in_objs, marker = ['abc_123', 'abc_456', 'abc_789',
+                           'def_101'], 'abc_123'
         out_objs = dd.filter_marker(in_objs, marker)
         assert list(out_objs) == ['abc_456', 'abc_789', 'def_101']
 
-        in_objs, marker = ['abc_123', 'abc_456', 'abc_789', 'def_101'], 'def_101'
+        in_objs, marker = ['abc_123', 'abc_456', 'abc_789',
+                           'def_101'], 'def_101'
         out_objs = dd.filter_marker(in_objs, marker)
         assert list(out_objs) == []
 
@@ -179,13 +190,15 @@ class TestDiskDirModuleFunctions(unittest.TestCase):
         out_objs = dd.filter_prefix(in_objs, prefix)
         assert list(out_objs) == ['abc_123', 'abc_456', 'abc_789']
 
-        in_objs, prefix = ['ABC_123', 'ABC_456', 'abc_123', 'abc_456', 'abc_789', 'def_101'], 'abc'
+        in_objs, prefix = [
+            'ABC_123', 'ABC_456', 'abc_123', 'abc_456',
+            'abc_789', 'def_101'], 'abc'
         out_objs = dd.filter_prefix(in_objs, prefix)
         assert list(out_objs) == ['abc_123', 'abc_456', 'abc_789']
 
         in_objs, prefix = ['abc_123', 'def_101', 'abc_456', 'abc_789'], 'abc'
         out_objs = dd.filter_prefix(in_objs, prefix)
-        assert list(out_objs) == ['abc_123',]
+        assert list(out_objs) == ['abc_123', ]
 
     def test_filter_delimiter(self):
         in_objs, delimiter, prefix, marker = [], None, '', ''
@@ -220,34 +233,42 @@ class TestDiskDirModuleFunctions(unittest.TestCase):
         out_objs = dd.filter_delimiter(in_objs, delimiter, prefix, marker)
         assert list(out_objs) == in_objs
 
-        in_objs, delimiter, prefix, marker = ['abc_123', 'abc_456'], '_', '', ''
+        in_objs, delimiter, prefix, marker = ['abc_123',
+                                              'abc_456'], '_', '', ''
         out_objs = dd.filter_delimiter(in_objs, delimiter, prefix, marker)
         assert list(out_objs) == ['abc_']
 
-        in_objs, delimiter, prefix, marker = ['abc_123', 'abc_456', 'def_123', 'def_456'], '_', '', ''
+        in_objs, delimiter, prefix, marker = ['abc_123', 'abc_456', 'def_123',
+                                              'def_456'], '_', '', ''
         out_objs = dd.filter_delimiter(in_objs, delimiter, prefix, marker)
         assert list(out_objs) == ['abc_', 'def_']
 
-        in_objs, delimiter, prefix, marker = ['abc_123', 'abc_456', 'abc_789', 'def_101'], '_', 'abc_', ''
+        in_objs, delimiter, prefix, marker = ['abc_123', 'abc_456', 'abc_789',
+                                              'def_101'], '_', 'abc_', ''
         out_objs = dd.filter_delimiter(in_objs, delimiter, prefix, marker)
         l = list(out_objs)
         assert l == ['abc_123', 'abc_456', 'abc_789'], repr(l)
 
-        in_objs, delimiter, prefix, marker = ['abc_123_a', 'abc_456', 'abc_789_', 'def_101'], '_', 'abc_', ''
+        in_objs, delimiter, prefix, marker = [
+            'abc_123_a', 'abc_456', 'abc_789_', 'def_101'], '_', 'abc_', ''
         out_objs = dd.filter_delimiter(in_objs, delimiter, prefix, marker)
         l = list(out_objs)
         assert l == ['abc_123_', 'abc_456', 'abc_789_'], repr(l)
 
-        in_objs, delimiter, prefix, marker, path = ['abc_123_a', 'abc_456', 'abc_789_', 'def_101'], '_', 'abc_', '', ''
-        out_objs = dd.filter_delimiter(in_objs, delimiter, prefix, marker, path)
+        in_objs, delimiter, prefix, marker, path = [
+            'abc_123_a', 'abc_456', 'abc_789_', 'def_101'], '_', 'abc_', '', ''
+        out_objs = dd.filter_delimiter(
+            in_objs, delimiter, prefix, marker, path)
         l = list(out_objs)
         # FIXME: This appears to be a bug due to this upstream swift reference
         # implementation of list_objects_iter, where the presence of a path
         # forces a code path that does not add the match on a delimiter
         assert l == ['abc_456', 'abc_789_'], repr(l)
 
-        in_objs, delimiter, prefix, marker, path = ['abc/123', 'abc/456', 'def/123', 'def/456'], '/', 'abc/', '', ''
-        out_objs = dd.filter_delimiter(in_objs, delimiter, prefix, marker, path)
+        in_objs, delimiter, prefix, marker, path = [
+            'abc/123', 'abc/456', 'def/123', 'def/456'], '/', 'abc/', '', ''
+        out_objs = dd.filter_delimiter(
+            in_objs, delimiter, prefix, marker, path)
         l = list(out_objs)
         assert l == ['abc/123', 'abc/456'], repr(l)
 
@@ -444,7 +465,8 @@ class TestContainerBroker(unittest.TestCase):
         self.assertEqual(os.path.basename(broker.db_file), 'db_file.db')
         broker.initialize(self.initial_ts)
         self.assertTrue(os.path.isdir(self.container))
-        self.assertEquals(self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
+        self.assertEquals(
+            self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
         self.assertFalse(broker.is_deleted())
 
     def test_creation_existing(self):
@@ -455,7 +477,8 @@ class TestContainerBroker(unittest.TestCase):
         self.assertEqual(os.path.basename(broker.db_file), 'db_file.db')
         broker.initialize(self.initial_ts)
         self.assertTrue(os.path.isdir(self.container))
-        self.assertEquals(self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
+        self.assertEquals(
+            self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
         self.assertFalse(broker.is_deleted())
 
     def test_creation_existing_bad_metadata(self):
@@ -468,7 +491,8 @@ class TestContainerBroker(unittest.TestCase):
         self.assertEqual(os.path.basename(broker.db_file), 'db_file.db')
         broker.initialize(self.initial_ts)
         self.assertTrue(os.path.isdir(self.container))
-        self.assertEquals(self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
+        self.assertEquals(
+            self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
         self.assertFalse(broker.is_deleted())
 
     def test_empty(self):
@@ -1041,7 +1065,8 @@ class TestContainerBroker(unittest.TestCase):
         self.assertEqual(os.path.basename(broker.db_file), 'db_file.db')
         broker.initialize(self.initial_ts)
         self.assertTrue(os.path.isdir(self.container))
-        self.assertEquals(self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
+        self.assertEquals(
+            self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
         self.assertFalse(broker.is_deleted())
         broker.delete_db(normalize_timestamp(time()))
         self.assertTrue(broker.is_deleted())
@@ -1092,7 +1117,8 @@ class TestAccountBroker(unittest.TestCase):
         self.assertEqual(os.path.basename(broker.db_file), 'db_file.db')
         broker.initialize(self.initial_ts)
         self.assertTrue(os.path.isdir(self.drive_fullpath))
-        self.assertEquals(self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
+        self.assertEquals(
+            self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
         self.assertFalse(broker.is_deleted())
 
     def test_creation_bad_metadata(self):
@@ -1103,7 +1129,8 @@ class TestAccountBroker(unittest.TestCase):
         self.assertEqual(os.path.basename(broker.db_file), 'db_file.db')
         broker.initialize(self.initial_ts)
         self.assertTrue(os.path.isdir(self.drive_fullpath))
-        self.assertEquals(self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
+        self.assertEquals(
+            self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
         self.assertFalse(broker.is_deleted())
 
     def test_empty(self):
@@ -1278,7 +1305,8 @@ class TestAccountBroker(unittest.TestCase):
         listing = broker.list_containers_iter(100, '', None, None,
                                               '', 'text/plain')
         self.assertEquals(len(listing), 10)
-        for i, (name, o_count, bytes_used, last_modified, j) in enumerate(listing):
+        for i, (name, o_count, bytes_used,
+                last_modified, j) in enumerate(listing):
             self.assertEqual(name, 'lci%d' % i)
             self.assertEqual(o_count, 0)
             self.assertEqual(bytes_used, 0)
@@ -1292,7 +1320,8 @@ class TestAccountBroker(unittest.TestCase):
         # Confirm that metadata of containers (xattrs) are not fetched when
         # response_content_type is text/plain
         _m_r_md = Mock(return_value={})
-        with patch('file_connector.swift.common.DiskDir._read_metadata', _m_r_md):
+        with patch('file_connector.swift.common.DiskDir._read_metadata',
+                   _m_r_md):
             listing = broker.list_containers_iter(100, '', None, None,
                                                   '', 'text/plain')
             self.assertEquals(len(listing), 10)
@@ -1301,7 +1330,8 @@ class TestAccountBroker(unittest.TestCase):
         # Confirm that metadata of containers (xattrs) are still fetched when
         # response_content_type is NOT text/plain
         _m_r_md.reset_mock()
-        with patch('file_connector.swift.common.DiskDir._read_metadata', _m_r_md):
+        with patch('file_connector.swift.common.DiskDir._read_metadata',
+                   _m_r_md):
             listing = broker.list_containers_iter(100, '', None, None,
                                                   '', 'application/json')
             self.assertEquals(len(listing), 10)
@@ -1349,7 +1379,8 @@ class TestAccountBroker(unittest.TestCase):
         self.assertEqual(os.path.basename(broker.db_file), 'db_file.db')
         broker.initialize(self.initial_ts)
         self.assertTrue(os.path.isdir(self.drive_fullpath))
-        self.assertEquals(self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
+        self.assertEquals(
+            self.initial_ts, broker.metadata[utils.X_TIMESTAMP][0])
         self.assertFalse(broker.is_deleted())
         broker.delete_db(normalize_timestamp(time()))
         # Deleting the "db" should be a NOOP

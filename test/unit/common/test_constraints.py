@@ -63,26 +63,30 @@ class TestConstraints(unittest.TestCase):
 
     def test_validate_obj_name_component(self):
         max_obj_len = cnt.get_object_name_component_length()
-        self.assertFalse(cnt.validate_obj_name_component('tests'*(max_obj_len/5)))
+        self.assertFalse(
+            cnt.validate_obj_name_component('tests'*(max_obj_len/5)))
         cnt.set_object_name_component_length(300)
         self.assertFalse(cnt.validate_obj_name_component('tests'*60))
 
     def test_validate_obj_name_component_err(self):
         max_obj_len = cnt.get_object_name_component_length()
-        self.assertTrue(cnt.validate_obj_name_component('tests'*(max_obj_len/5+1)))
+        self.assertTrue(cnt.validate_obj_name_component(
+            'tests'*(max_obj_len/5+1)))
         self.assertTrue(cnt.validate_obj_name_component('.'))
         self.assertTrue(cnt.validate_obj_name_component('..'))
         self.assertTrue(cnt.validate_obj_name_component(''))
 
     def test_check_object_creation(self):
-        with patch('file_connector.swift.common.constraints.__check_object_creation',
+        with patch('file_connector.swift.common.constraints.'
+                   '__check_object_creation',
                    mock_check_object_creation):
             req = Mock()
             req.headers = []
             self.assertFalse(cnt._check_object_creation(req, 'dir/z'))
 
     def test_check_object_creation_err(self):
-        with patch('file_connector.swift.common.constraints.__check_object_creation',
+        with patch('file_connector.swift.common.constraints.'
+                   '__check_object_creation',
                    mock_check_object_creation):
             req = Mock()
             req.headers = []

@@ -27,7 +27,7 @@ import time
 from hashlib import md5
 from uuid import uuid4
 from eventlet import sleep
-from swift.common.utils import Timestamp
+from swift.common.utils import Timestamp, config_true_value
 from contextlib import contextmanager
 from file_connector.swift.common.exceptions import AlreadyExistsAsFile, \
     AlreadyExistsAsDir, DiskFileContainerDoesNotExist
@@ -219,6 +219,8 @@ class DiskFileManager(SwiftDiskFileManager):
     def __init__(self, conf, logger):
         super(DiskFileManager, self).__init__(conf, logger)
         threads_per_disk = int(conf.get('threads_per_disk', '0'))
+        self.support_metadata = config_true_value(
+            conf.get('write_metadata', 'true'))
         self.threadpools = defaultdict(
             lambda: ThreadPool(nthreads=threads_per_disk))
 
@@ -267,7 +269,7 @@ class DiskFileWriter(object):
         self._put_datadir = datadir
         self._size = size
         self._disk_file = disk_file
-        self._metadata_support = False
+        self._metadata_support = self._disk_file._mgr.support_metadata
 
         # Internal attributes
         self._chunks_etag = md5()
