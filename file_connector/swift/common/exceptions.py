@@ -16,39 +16,39 @@
 from swift.common.exceptions import SwiftException
 
 
-class NasConnectorFileSystemOSError(OSError):
+class FileConnectorFileSystemOSError(OSError):
     pass
 
 
-class NasConnectorFileSystemIOError(IOError):
+class FileConnectorFileSystemIOError(IOError):
     pass
 
 
-class NasConnectorException(Exception):
+class FileConnectorException(Exception):
     pass
 
 
-class FailureToMountError(NasConnectorException):
+class FailureToMountError(FileConnectorException):
     pass
 
 
-class FileOrDirNotFoundError(NasConnectorException):
+class FileOrDirNotFoundError(FileConnectorException):
     pass
 
 
-class NotDirectoryError(NasConnectorException):
+class NotDirectoryError(FileConnectorException):
     pass
 
 
-class AlreadyExistsAsDir(NasConnectorException):
+class AlreadyExistsAsDir(FileConnectorException):
     pass
 
 
-class AlreadyExistsAsFile(NasConnectorException):
+class AlreadyExistsAsFile(FileConnectorException):
     pass
 
 
-class DiskFileContainerDoesNotExist(NasConnectorException):
+class DiskFileContainerDoesNotExist(FileConnectorException):
     pass
 
 

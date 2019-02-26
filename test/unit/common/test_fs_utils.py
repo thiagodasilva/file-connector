@@ -24,7 +24,7 @@ from time import sleep
 from tempfile import mkdtemp, mkstemp
 from file_connector.swift.common import fs_utils as fs
 from file_connector.swift.common.exceptions import NotDirectoryError, \
-    FileOrDirNotFoundError, NasConnectorFileSystemOSError
+    FileOrDirNotFoundError, FileConnectorFileSystemOSError
 from swift.common.exceptions import DiskFileNoSpace
 
 
@@ -91,10 +91,10 @@ class TestFsUtils(unittest.TestCase):
             with patch("os.lstat", _mock_os_lstat):
                 try:
                     fs.do_ismount(tmpdir)
-                except NasConnectorFileSystemOSError:
+                except FileConnectorFileSystemOSError:
                     pass
                 else:
-                    self.fail("Expected NasConnectorFileSystemOSError")
+                    self.fail("Expected FileConnectorFileSystemOSError")
         finally:
             shutil.rmtree(tmpdir)
 
@@ -125,10 +125,10 @@ class TestFsUtils(unittest.TestCase):
             with patch("os.lstat", _mock_os_lstat):
                 try:
                     fs.do_ismount(tmpdir)
-                except NasConnectorFileSystemOSError:
+                except FileConnectorFileSystemOSError:
                     pass
                 else:
-                    self.fail("Expected NasConnectorFileSystemOSError")
+                    self.fail("Expected FileConnectorFileSystemOSError")
         finally:
             shutil.rmtree(tmpdir)
 
@@ -155,7 +155,7 @@ class TestFsUtils(unittest.TestCase):
             with patch("os.lstat", _mock_os_lstat):
                 try:
                     fs.do_ismount(tmpdir)
-                except NasConnectorFileSystemOSError:
+                except FileConnectorFileSystemOSError:
                     self.fail("Unexpected exception")
                 else:
                     pass
@@ -187,7 +187,7 @@ class TestFsUtils(unittest.TestCase):
             with patch("os.lstat", _mock_os_lstat):
                 try:
                     fs.do_ismount(tmpdir)
-                except NasConnectorFileSystemOSError:
+                except FileConnectorFileSystemOSError:
                     self.fail("Unexpected exception")
                 else:
                     pass
@@ -214,10 +214,10 @@ class TestFsUtils(unittest.TestCase):
         try:
             fs.do_open(os.path.join('/tmp', str(random.random())),
                        os.O_RDONLY)
-        except NasConnectorFileSystemOSError:
+        except FileConnectorFileSystemOSError:
             pass
         else:
-            self.fail("NasConnectorFileSystemOSError expected")
+            self.fail("FileConnectorFileSystemOSError expected")
 
     def test_do_write(self):
         fd, tmpfile = mkstemp()
@@ -234,13 +234,13 @@ class TestFsUtils(unittest.TestCase):
             fd1 = os.open(tmpfile, os.O_RDONLY)
             try:
                 fs.do_write(fd1, "test")
-            except NasConnectorFileSystemOSError:
+            except FileConnectorFileSystemOSError:
                 pass
             else:
-                self.fail("NasConnectorFileSystemOSError expected")
+                self.fail("FileConnectorFileSystemOSError expected")
             finally:
                 os.close(fd1)
-        except NasConnectorFileSystemOSError as ose:
+        except FileConnectorFileSystemOSError as ose:
             self.fail("Open failed with %s" % ose.strerror)
         finally:
             os.close(fd)
@@ -283,7 +283,7 @@ class TestFsUtils(unittest.TestCase):
         tmpdir = mkdtemp()
         try:
             fs.mkdirs(tmpdir)
-        except (NasConnectorFileSystemOSError, OSError):
+        except (FileConnectorFileSystemOSError, OSError):
             self.fail("Unexpected exception")
         else:
             pass
@@ -298,7 +298,7 @@ class TestFsUtils(unittest.TestCase):
         except OSError:
             pass
         else:
-            self.fail("Expected NasConnectorFileSystemOSError exception")
+            self.fail("Expected FileConnectorFileSystemOSError exception")
         finally:
             os.close(fd)
             shutil.rmtree(tmpdir)
@@ -311,7 +311,7 @@ class TestFsUtils(unittest.TestCase):
         except OSError:
             pass
         else:
-            self.fail("Expected NasConnectorFileSystemOSError exception")
+            self.fail("Expected FileConnectorFileSystemOSError exception")
         finally:
             os.close(fd)
             shutil.rmtree(tmpdir)
@@ -384,10 +384,10 @@ class TestFsUtils(unittest.TestCase):
         try:
             path = os.path.join('/tmp', str(random.random()))
             fs.do_listdir(path)
-        except NasConnectorFileSystemOSError:
+        except FileConnectorFileSystemOSError:
             pass
         else:
-            self.fail("NasConnectorFileSystemOSError expected")
+            self.fail("FileConnectorFileSystemOSError expected")
 
     def test_do_fstat(self):
         tmpdir = mkdtemp()
@@ -405,10 +405,10 @@ class TestFsUtils(unittest.TestCase):
     def test_do_fstat_err(self):
         try:
             fs.do_fstat(1000)
-        except NasConnectorFileSystemOSError:
+        except FileConnectorFileSystemOSError:
             pass
         else:
-            self.fail("Expected NasConnectorFileSystemOSError")
+            self.fail("Expected FileConnectorFileSystemOSError")
 
     def test_do_stat(self):
         tmpdir = mkdtemp()
@@ -435,10 +435,10 @@ class TestFsUtils(unittest.TestCase):
         try:
             with patch('os.stat', mock_os_stat_eacces):
                 fs.do_stat('/tmp')
-        except NasConnectorFileSystemOSError:
+        except FileConnectorFileSystemOSError:
             pass
         else:
-            self.fail("NasConnectorFileSystemOSError expected")
+            self.fail("FileConnectorFileSystemOSError expected")
 
     def test_do_stat_eio_once(self):
         count = [0]
@@ -474,10 +474,10 @@ class TestFsUtils(unittest.TestCase):
         try:
             with patch('os.stat', mock_os_stat_eio):
                 fs.do_stat('/tmp')
-        except NasConnectorFileSystemOSError:
+        except FileConnectorFileSystemOSError:
             pass
         else:
-            self.fail("NasConnectorFileSystemOSError expected")
+            self.fail("FileConnectorFileSystemOSError expected")
 
     def test_do_close(self):
         fd, tmpfile = mkstemp()
@@ -499,10 +499,10 @@ class TestFsUtils(unittest.TestCase):
 
             try:
                 fs.do_close(fd)
-            except NasConnectorFileSystemOSError:
+            except FileConnectorFileSystemOSError:
                 pass
             else:
-                self.fail("NasConnectorFileSystemOSError expected")
+                self.fail("FileConnectorFileSystemOSError expected")
         finally:
             os.remove(tmpfile)
 
@@ -529,10 +529,10 @@ class TestFsUtils(unittest.TestCase):
         tmpdir = mkdtemp()
         try:
             fs.do_unlink(tmpdir)
-        except NasConnectorFileSystemOSError:
+        except FileConnectorFileSystemOSError:
             pass
         else:
-            self.fail('NasConnectorFileSystemOSError expected')
+            self.fail('FileConnectorFileSystemOSError expected')
         finally:
             os.rmdir(tmpdir)
 
@@ -551,10 +551,10 @@ class TestFsUtils(unittest.TestCase):
             srcpath = os.path.join('/tmp', str(random.random()))
             destpath = os.path.join('/tmp', str(random.random()))
             fs.do_rename(srcpath, destpath)
-        except NasConnectorFileSystemOSError:
+        except FileConnectorFileSystemOSError:
             pass
         else:
-            self.fail("NasConnectorFileSystemOSError expected")
+            self.fail("FileConnectorFileSystemOSError expected")
 
     def test_dir_empty(self):
         tmpdir = mkdtemp()
@@ -572,10 +572,10 @@ class TestFsUtils(unittest.TestCase):
         with patch("os.listdir", _mock_os_listdir):
             try:
                 fs.dir_empty("/tmp")
-            except NasConnectorFileSystemOSError:
+            except FileConnectorFileSystemOSError:
                 pass
             else:
-                self.fail("NasConnectorFileSystemOSError exception expected")
+                self.fail("FileConnectorFileSystemOSError exception expected")
 
     def test_dir_empty_notfound(self):
         try:
@@ -605,17 +605,17 @@ class TestFsUtils(unittest.TestCase):
             fd, tmpfile = mkstemp(dir=tmpdir)
             try:
                 fs.do_rmdir(tmpfile)
-            except NasConnectorFileSystemOSError:
+            except FileConnectorFileSystemOSError:
                 pass
             else:
-                self.fail("Expected NasConnectorFileSystemOSError")
+                self.fail("Expected FileConnectorFileSystemOSError")
             assert os.path.exists(subdir)
             try:
                 fs.do_rmdir(tmpdir)
-            except NasConnectorFileSystemOSError:
+            except FileConnectorFileSystemOSError:
                 pass
             else:
-                self.fail("Expected NasConnectorFileSystemOSError")
+                self.fail("Expected FileConnectorFileSystemOSError")
             assert os.path.exists(subdir)
             fs.do_rmdir(subdir)
             assert not os.path.exists(subdir)
@@ -633,12 +633,13 @@ class TestFsUtils(unittest.TestCase):
             else:
                 try:
                     fs.do_chown(subdir, 20000, 20000)
-                except NasConnectorFileSystemOSError as ex:
+                except FileConnectorFileSystemOSError as ex:
                     if ex.errno != errno.EPERM:
                         self.fail(
-                            "Expected NasConnectorFileSystemOSError(errno=EPERM)")
+                            "Expected FileConnectorFileSystemOSError("
+                            "errno=EPERM)")
                 else:
-                    self.fail("Expected NasConnectorFileSystemOSError")
+                    self.fail("Expected FileConnectorFileSystemOSError")
         finally:
             shutil.rmtree(tmpdir)
 
@@ -652,12 +653,13 @@ class TestFsUtils(unittest.TestCase):
             else:
                 try:
                     fs.do_chown(tmpfile, 20000, 20000)
-                except NasConnectorFileSystemOSError as ex:
+                except FileConnectorFileSystemOSError as ex:
                     if ex.errno != errno.EPERM:
                         self.fail(
-                            "Expected NasConnectorFileSystemOSError(errno=EPERM")
+                            "Expected FileConnectorFileSystemOSError("
+                            "errno=EPERM")
                 else:
-                    self.fail("Expected NasConnectorFileSystemOSError")
+                    self.fail("Expected FileConnectorFileSystemOSError")
         finally:
             os.close(fd)
             shutil.rmtree(tmpdir)
@@ -666,10 +668,10 @@ class TestFsUtils(unittest.TestCase):
         try:
             fs.do_chown(os.path.join('/tmp', str(random.random())),
                         20000, 20000)
-        except NasConnectorFileSystemOSError:
+        except FileConnectorFileSystemOSError:
             pass
         else:
-            self.fail("Expected NasConnectorFileSystemOSError")
+            self.fail("Expected FileConnectorFileSystemOSError")
 
     def test_fchown(self):
         tmpdir = mkdtemp()
@@ -681,12 +683,13 @@ class TestFsUtils(unittest.TestCase):
             else:
                 try:
                     fs.do_fchown(fd, 20000, 20000)
-                except NasConnectorFileSystemOSError as ex:
+                except FileConnectorFileSystemOSError as ex:
                     if ex.errno != errno.EPERM:
                         self.fail(
-                            "Expected NasConnectorFileSystemOSError(errno=EPERM)")
+                            "Expected FileConnectorFileSystemOSError("
+                            "errno=EPERM)")
                 else:
-                    self.fail("Expected NasConnectorFileSystemOSError")
+                    self.fail("Expected FileConnectorFileSystemOSError")
         finally:
             os.close(fd)
             shutil.rmtree(tmpdir)
@@ -702,12 +705,13 @@ class TestFsUtils(unittest.TestCase):
             else:
                 try:
                     fs.do_fchown(fd_rd, 20000, 20000)
-                except NasConnectorFileSystemOSError as ex:
+                except FileConnectorFileSystemOSError as ex:
                     if ex.errno != errno.EPERM:
                         self.fail(
-                            "Expected NasConnectorFileSystemOSError(errno=EPERM)")
+                            "Expected FileConnectorFileSystemOSError("
+                            "errno=EPERM)")
                 else:
-                    self.fail("Expected NasConnectorFileSystemOSError")
+                    self.fail("Expected FileConnectorFileSystemOSError")
         finally:
             os.close(fd_rd)
             os.close(fd)
@@ -721,7 +725,7 @@ class TestFsUtils(unittest.TestCase):
                 os.write(fd, 'test')
                 with patch('os.fsync', mock_os_fsync):
                     assert fs.do_fsync(fd) is None
-            except NasConnectorFileSystemOSError as ose:
+            except FileConnectorFileSystemOSError as ose:
                 self.fail('Opening a temporary file failed with %s' %
                           ose.strerror)
             else:
@@ -739,10 +743,10 @@ class TestFsUtils(unittest.TestCase):
             os.close(fd)
             try:
                 fs.do_fsync(fd)
-            except NasConnectorFileSystemOSError:
+            except FileConnectorFileSystemOSError:
                 pass
             else:
-                self.fail("Expected NasConnectorFileSystemOSError")
+                self.fail("Expected FileConnectorFileSystemOSError")
         finally:
             shutil.rmtree(tmpdir)
 
@@ -754,7 +758,7 @@ class TestFsUtils(unittest.TestCase):
                 os.write(fd, 'test')
                 with patch('os.fdatasync', mock_os_fdatasync):
                     assert fs.do_fdatasync(fd) is None
-            except NasConnectorFileSystemOSError as ose:
+            except FileConnectorFileSystemOSError as ose:
                 self.fail('Opening a temporary file failed with %s' %
                           ose.strerror)
             else:
@@ -772,10 +776,10 @@ class TestFsUtils(unittest.TestCase):
             os.close(fd)
             try:
                 fs.do_fdatasync(fd)
-            except NasConnectorFileSystemOSError:
+            except FileConnectorFileSystemOSError:
                 pass
             else:
-                self.fail("Expected NasConnectorFileSystemOSError")
+                self.fail("Expected FileConnectorFileSystemOSError")
         finally:
             shutil.rmtree(tmpdir)
 

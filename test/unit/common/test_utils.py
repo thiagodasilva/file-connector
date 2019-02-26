@@ -30,8 +30,8 @@ from mock import patch, Mock
 from file_connector.swift.common import utils
 from file_connector.swift.common.utils import deserialize_metadata, \
     serialize_metadata, PICKLE_PROTOCOL
-from file_connector.swift.common.exceptions import NasConnectorFileSystemOSError,\
-    NasConnectorFileSystemIOError
+from file_connector.swift.common.exceptions import FileConnectorFileSystemOSError,\
+    FileConnectorFileSystemIOError
 from swift.common.exceptions import DiskFileNoSpace
 from test.unit import DATA_DIR
 
@@ -234,7 +234,8 @@ class TestUtils(unittest.TestCase):
         path = "/tmp/foo/w"
         orig_d = {'bar': 'x' * 150000}
         utils.write_metadata(path, orig_d)
-        assert len(_xattrs.keys()) == 3, "Expected 3 keys, found %d" % len(_xattrs.keys())
+        self.assertEqual(len(_xattrs.keys()), 3,
+                         "Expected 3 keys, found %d" % len(_xattrs.keys()))
         payload = ''
         for i in range(0, 3):
             xkey = _xkey(path, "%s%s" % (utils.METADATA_KEY, i or ''))
@@ -336,8 +337,10 @@ class TestUtils(unittest.TestCase):
         path = "/tmp/foo/i"
         res_d = utils.restore_metadata(path, {'b': 'y'}, {})
         expected_d = {'b': 'y'}
-        assert res_d == expected_d, "Expected %r, result %r" % (expected_d, res_d)
-        assert _xattr_op_cnt['set'] == 1, "%r" % _xattr_op_cnt
+        self.assertEqual(
+            res_d, expected_d,
+            "Expected %r, result %r" % (expected_d, res_d))
+        self.assertEqual(_xattr_op_cnt['set'], 1, "%r" % _xattr_op_cnt)
 
     def test_restore_metadata(self):
         # Initial metadata
@@ -347,7 +350,9 @@ class TestUtils(unittest.TestCase):
         _xattrs[xkey] = serialize_metadata(initial_d)
         res_d = utils.restore_metadata(path, {'b': 'y'}, initial_d)
         expected_d = {'a': 'z', 'b': 'y'}
-        assert res_d == expected_d, "Expected %r, result %r" % (expected_d, res_d)
+        self.assertEqual(
+            res_d, expected_d,
+            "Expected %r, result %r" % (expected_d, res_d))
         assert _xattr_op_cnt['set'] == 1, "%r" % _xattr_op_cnt
 
     def test_restore_metadata_nochange(self):
@@ -358,7 +363,8 @@ class TestUtils(unittest.TestCase):
         _xattrs[xkey] = serialize_metadata(initial_d)
         res_d = utils.restore_metadata(path, {}, initial_d)
         expected_d = {'a': 'z'}
-        assert res_d == expected_d, "Expected %r, result %r" % (expected_d, res_d)
+        self.assertEqual(res_d, expected_d,
+                         "Expected %r, result %r" % (expected_d, res_d))
         assert _xattr_op_cnt['set'] == 0, "%r" % _xattr_op_cnt
 
     def test_deserialize_metadata_pickle(self):
@@ -460,7 +466,8 @@ class TestUtils(unittest.TestCase):
         os.lseek(fd, 0, os.SEEK_SET)
 
         mock_do_close = Mock()
-        with patch("file_connector.swift.common.utils.do_close", mock_do_close):
+        with patch("file_connector.swift.common.utils.do_close",
+                   mock_do_close):
             etag = utils._get_etag(fd)
         self.assertEqual(etag, hashlib.md5(data).hexdigest())
         self.assertTrue(mock_do_close.called)
@@ -478,7 +485,7 @@ class TestUtils(unittest.TestCase):
         try:
             utils.get_object_metadata(
                 os.path.join(tf.name, "doesNotEx1st"))
-        except NasConnectorFileSystemOSError as e:
+        except FileConnectorFileSystemOSError as e:
             assert e.errno != errno.ENOENT
         else:
             self.fail("Expected exception")
@@ -497,7 +504,8 @@ class TestUtils(unittest.TestCase):
         assert md[utils.X_OBJECT_TYPE] == utils.FILE
         assert md[utils.X_CONTENT_TYPE] == utils.FILE_TYPE
         assert md[utils.X_CONTENT_LENGTH] == os.path.getsize(tf.name)
-        assert md[utils.X_TIMESTAMP] == utils.normalize_timestamp(os.path.getctime(tf.name))
+        assert md[utils.X_TIMESTAMP] == utils.normalize_timestamp(
+            os.path.getctime(tf.name))
         assert md[utils.X_ETAG] == utils._get_etag(tf.name)
 
     def test_get_object_metadata_dir(self):
@@ -510,7 +518,8 @@ class TestUtils(unittest.TestCase):
             assert md[utils.X_OBJECT_TYPE] == utils.DIR_NON_OBJECT
             assert md[utils.X_CONTENT_TYPE] == utils.DIR_TYPE
             assert md[utils.X_CONTENT_LENGTH] == 0
-            assert md[utils.X_TIMESTAMP] == utils.normalize_timestamp(os.path.getctime(td))
+            self.assertEqual(md[utils.X_TIMESTAMP],
+                             utils.normalize_timestamp(os.path.getctime(td)))
             assert md[utils.X_ETAG] == hashlib.md5().hexdigest()
         finally:
             os.rmdir(td)
@@ -576,8 +585,10 @@ class TestUtils(unittest.TestCase):
         try:
             exp_md = {
                 utils.X_TYPE: (utils.CONTAINER, 0),
-                utils.X_TIMESTAMP: (utils.normalize_timestamp(os.path.getctime(td)), 0),
-                utils.X_PUT_TIMESTAMP: (utils.normalize_timestamp(os.path.getmtime(td)), 0),
+                utils.X_TIMESTAMP: (utils.normalize_timestamp(
+                    os.path.getctime(td)), 0),
+                utils.X_PUT_TIMESTAMP: (utils.normalize_timestamp(
+                    os.path.getmtime(td)), 0),
                 utils.X_OBJECTS_COUNT: (3, 0),
                 utils.X_BYTES_USED: (47, 0),
             }
@@ -598,8 +609,10 @@ class TestUtils(unittest.TestCase):
         try:
             exp_md = {
                 utils.X_TYPE: (utils.ACCOUNT, 0),
-                utils.X_TIMESTAMP: (utils.normalize_timestamp(os.path.getctime(td)), 0),
-                utils.X_PUT_TIMESTAMP: (utils.normalize_timestamp(os.path.getmtime(td)), 0),
+                utils.X_TIMESTAMP: (utils.normalize_timestamp(
+                    os.path.getctime(td)), 0),
+                utils.X_PUT_TIMESTAMP: (utils.normalize_timestamp(
+                    os.path.getmtime(td)), 0),
                 utils.X_OBJECTS_COUNT: (0, 0),
                 utils.X_BYTES_USED: (0, 0),
                 utils.X_CONTAINER_COUNT: (2, 0),
@@ -939,7 +952,7 @@ class TestUtilsDirObjects(unittest.TestCase):
         def _mock_rm(path):
             print "_mock_rm-metadata_enoent(%s)" % path
             shutil.rmtree(path)
-            raise NasConnectorFileSystemIOError(errno.ENOENT,
+            raise FileConnectorFileSystemIOError(errno.ENOENT,
                                            os.strerror(errno.ENOENT))
 
         # Remove the files
@@ -1025,7 +1038,8 @@ class TestUtilsDirObjects(unittest.TestCase):
             if path == self.rootdir:
                 if not seen[0]:
                     seen[0] = 1
-                    raise OSError(errno.ENOTEMPTY, os.strerror(errno.ENOTEMPTY))
+                    raise OSError(errno.ENOTEMPTY,
+                                  os.strerror(errno.ENOTEMPTY))
                 else:
                     return _orig_rm(path)
             else:
@@ -1058,7 +1072,8 @@ class TestUtilsDirObjects(unittest.TestCase):
             if path == self.rootdir:
                 if not seen[0]:
                     seen[0] = 1
-                    raise OSError(errno.ENOTEMPTY, os.strerror(errno.ENOTEMPTY))
+                    raise OSError(errno.ENOTEMPTY,
+                                  os.strerror(errno.ENOTEMPTY))
                 else:
                     raise OSError(errno.EACCES, os.strerror(errno.EACCES))
             else:

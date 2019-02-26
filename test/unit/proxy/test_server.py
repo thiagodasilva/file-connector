@@ -8387,7 +8387,7 @@ class TestProxyObjectPerformance(unittest.TestCase):
         # Small, fast for testing
         obj_len = 2 * 64 * 1024
         # Use 1 GB or more for measurements
-        #obj_len = 2 * 512 * 1024 * 1024
+        # obj_len = 2 * 512 * 1024 * 1024
         self.path = '/v1/a/c/o.large'
         fd.write('PUT %s HTTP/1.1\r\n'
                  'Host: localhost\r\n'

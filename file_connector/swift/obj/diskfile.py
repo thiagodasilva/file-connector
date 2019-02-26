@@ -24,9 +24,10 @@ except ImportError:
     import random
 import logging
 import time
+from hashlib import md5
 from uuid import uuid4
 from eventlet import sleep
-from swift.common.utils import Timestamp
+from swift.common.utils import Timestamp, config_true_value
 from contextlib import contextmanager
 from file_connector.swift.common.exceptions import AlreadyExistsAsFile, \
     AlreadyExistsAsDir, DiskFileContainerDoesNotExist
@@ -36,7 +37,8 @@ from swift.common.exceptions import DiskFileNotExist, DiskFileError, \
     DiskFileExpired
 from swift.common.swob import multi_range_iterator
 
-from file_connector.swift.common.exceptions import NasConnectorFileSystemOSError
+from file_connector.swift.common.exceptions import \
+    FileConnectorFileSystemOSError
 from file_connector.swift.common.fs_utils import do_fstat, do_open, do_close, \
     do_unlink, do_chown, do_fsync, do_fchown, do_stat, do_write, do_read, \
     do_fadvise64, do_rename, do_fdatasync, do_lseek, do_mkdir
@@ -61,7 +63,7 @@ def _random_sleep():
     sleep(random.uniform(0.5, 0.15))
 
 
-def make_directory(full_path, uid, gid, metadata=None):
+def make_directory(full_path, uid, gid, metadata=None, metadata_support=True):
     """
     Make a directory and change the owner ship as specified, and potentially
     creating the object metadata if requested.
@@ -81,7 +83,7 @@ def make_directory(full_path, uid, gid, metadata=None):
             # not necessary.
             try:
                 stats = do_stat(full_path)
-            except NasConnectorFileSystemOSError as serr:
+            except FileConnectorFileSystemOSError as serr:
                 # FIXME: Ideally we'd want to return an appropriate error
                 # message and code in the PUT Object REST API response.
                 raise DiskFileError("make_directory: mkdir failed"
@@ -114,7 +116,7 @@ def make_directory(full_path, uid, gid, metadata=None):
             _random_sleep()
             try:
                 stats = do_stat(full_path)
-            except NasConnectorFileSystemOSError as serr:
+            except FileConnectorFileSystemOSError as serr:
                 if serr.errno == errno.ENOENT:
                     errmsg = "make_directory: mkdir failed on" \
                              " path %s (EIO), and a subsequent stat on" \
@@ -155,7 +157,7 @@ def make_directory(full_path, uid, gid, metadata=None):
             raise DiskFileError("make_directory: mkdir failed on"
                                 " path %s (%s)" % (full_path, str(err)))
     else:
-        if metadata:
+        if metadata and metadata_support:
             # We were asked to set the initial metadata for this object.
             metadata_orig = get_object_metadata(full_path)
             metadata_orig.update(metadata)
@@ -217,6 +219,8 @@ class DiskFileManager(SwiftDiskFileManager):
     def __init__(self, conf, logger):
         super(DiskFileManager, self).__init__(conf, logger)
         threads_per_disk = int(conf.get('threads_per_disk', '0'))
+        self.support_metadata = config_true_value(
+            conf.get('write_metadata', 'true'))
         self.threadpools = defaultdict(
             lambda: ThreadPool(nthreads=threads_per_disk))
 
@@ -239,18 +243,42 @@ class DiskFileWriter(object):
 
 
     """
-    def __init__(self, fd, tmppath, disk_file):
+    def __init__(self, obj, obj_path, datadir, size, disk_file):
+        """
+        DiskFileWriter constructor
+
+        :param obj: This is the 'basename' of the object name. This is
+                    the name that will be written as a file on the filesystem
+                    In the example: '/dev/acc/cont/foo/bar/baz', obj is baz
+        :param obj_path: This is the 'dirname' of the object name. The
+                    directory tree that is part of the object name, not
+                    containinig the acount and container.
+                    In the example: '/dev/acc/cont/foo/bar/baz', obj_path is
+                    'foo/bar'
+        :param datadir: The entire directory structure up to obj. In the
+                        example: '/dev/acc/cont/foo/bar/baz', datadir is
+                        '/dev/acc/cont/foo/bar'.
+        :param size: size of object
+        :param disk_file: the disk_file object
+        """
         # Parameter tracking
-        self._fd = fd
-        self._tmppath = tmppath
+        self._fd = None
+        self._tmppath = None
+        self._obj = obj
+        self._obj_path = obj_path
+        self._put_datadir = datadir
+        self._size = size
         self._disk_file = disk_file
+        self._metadata_support = self._disk_file._mgr.support_metadata
 
         # Internal attributes
+        self._chunks_etag = md5()
         self._upload_size = 0
         self._last_sync = 0
 
     def _write_entire_chunk(self, chunk):
         bytes_per_sync = self._disk_file._mgr.bytes_per_sync
+        self._chunks_etag.update(chunk)
         while chunk:
             written = do_write(self._fd, chunk)
             chunk = chunk[written:]
@@ -262,6 +290,171 @@ class DiskFileWriter(object):
                 do_fadvise64(self._fd, self._last_sync, diff)
                 self._last_sync = self._upload_size
 
+    def _create_dir_object(self, dir_path, metadata=None):
+        """
+        Create a directory object at the specified path. No check is made to
+        see if the directory object already exists, that is left to the caller
+        (this avoids a potentially duplicate stat() system call).
+
+        The "dir_path" must be relative to its container, self._container_path.
+
+        The "metadata" object is an optional set of metadata to apply to the
+        newly created directory object. If not present, no initial metadata is
+        applied.
+
+        The algorithm used is as follows:
+
+          1. An attempt is made to create the directory, assuming the parent
+             directory already exists
+
+             * Directory creation races are detected, returning success in
+               those cases
+
+          2. If the directory creation fails because some part of the path to
+             the directory does not exist, then a search back up the path is
+             performed to find the first existing ancestor directory, and then
+             the missing parents are successively created, finally creating
+             the target directory
+        """
+        df = self._disk_file
+        full_path = os.path.join(df._container_path, dir_path)
+        cur_path = full_path
+        stack = []
+        while True:
+            md = None if cur_path != full_path else metadata
+            ret, newmd = make_directory(cur_path, df._uid, df._gid, md,
+                                        self._metadata_support)
+            if ret:
+                break
+            # Some path of the parent did not exist, so loop around and
+            # create that, pushing this parent on the stack.
+            if os.path.sep not in cur_path:
+                raise DiskFileError("DiskFileWriter._create_dir_object():"
+                                    " failed to create directory path"
+                                    " while exhausting"
+                                    " path elements to create: %s" % full_path)
+            cur_path, child = cur_path.rsplit(os.path.sep, 1)
+            assert child
+            stack.append(child)
+
+        child = stack.pop() if stack else None
+        while child:
+            cur_path = os.path.join(cur_path, child)
+            md = None if cur_path != full_path else metadata
+            ret, newmd = make_directory(cur_path, df._uid, df._gid, md,
+                                        self._metadata_support)
+            if not ret:
+                raise DiskFileError("DiskFileWriter._create_dir_object():"
+                                    " failed to create directory path"
+                                    " to target, %s, on subpath: %s" % (
+                                        full_path, cur_path))
+            child = stack.pop() if stack else None
+        return True, newmd
+
+    def open(self):
+        data_file = os.path.join(self._put_datadir, self._obj)
+
+        # Assume the full directory path exists to the file already, and
+        # construct the proper name for the temporary file.
+        fd = None
+        attempts = 1
+        while True:
+            tmpfile = '.' + self._obj + '.' + uuid4().hex
+            tmppath = os.path.join(self._put_datadir, tmpfile)
+            try:
+                fd = do_open(tmppath,
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_CLOEXEC)
+
+                # Ensure it is properly owned before we make it available.
+                if not ((self._disk_file._uid == DEFAULT_UID) and
+                        (self._disk_file._gid == DEFAULT_GID)):
+                    # If both UID and GID is -1 (default values), it has no
+                    # effect. So don't do a fchown.
+                    # Further, at the time of this writing, UID and GID
+                    # information is not passed to DiskFile.
+                    do_fchown(fd, self._disk_file._uid, self._disk_file._gid)
+                # NOTE: we do not perform the fallocate call at all. We ignore
+                # it completely since at the time of this writing FUSE does not
+                # support it.
+            except FileConnectorFileSystemOSError as gerr:
+                if gerr.errno in (errno.ENOSPC, errno.EDQUOT):
+                    # Raise DiskFileNoSpace to be handled by upper layers when
+                    # there is no space on disk OR when quota is exceeded
+                    raise DiskFileNoSpace()
+                if gerr.errno == errno.ENOTDIR:
+                    raise AlreadyExistsAsFile('do_open(): failed on %s,'
+                                              '  path or part of a'
+                                              ' path is not a directory'
+                                              % (tmppath))
+
+                if gerr.errno not in (errno.ENOENT, errno.EEXIST, errno.EIO):
+                    # FIXME: Other cases we should handle?
+                    raise
+                if attempts >= MAX_OPEN_ATTEMPTS:
+                    # We failed after N attempts to create the temporary
+                    # file.
+                    raise DiskFileError('DiskFile.create(): failed to'
+                                        ' successfully create a temporary file'
+                                        ' without running into a name conflict'
+                                        ' after %d of %d attempts for: %s' % (
+                                            attempts, MAX_OPEN_ATTEMPTS,
+                                            data_file))
+                if gerr.errno == errno.EEXIST:
+                    # Retry with a different random number.
+                    attempts += 1
+                elif gerr.errno == errno.EIO:
+                    # FIXME: Possible FUSE issue or race condition, let's
+                    # sleep on it and retry the operation.
+                    _random_sleep()
+                    logging.warn("DiskFile.create(): %s ... retrying in"
+                                 " 0.1 secs", gerr)
+                    attempts += 1
+                elif not self._obj_path:
+                    # ENOENT
+                    # No directory hierarchy and the create failed telling us
+                    # the container or volume directory does not exist. This
+                    # could be a FUSE issue or some race condition, so let's
+                    # sleep a bit and retry.
+                    # Handle race:
+                    # This can be the issue when memcache has cached that the
+                    # container exists. If someone removes the container dir
+                    # from filesystem, it's not reflected in memcache. So
+                    # swift reports that the container exists and this code
+                    # tries to create a file in a directory that does not
+                    # exist. However, it's wrong to create the container here.
+                    _random_sleep()
+                    logging.warn("DiskFile.create(): %s ... retrying in"
+                                 " 0.1 secs", gerr)
+                    attempts += 1
+                    if attempts > 2:
+                        # Ideally we would want to return 404 indicating that
+                        # the container itself does not exist. Can't be done
+                        # though as the caller won't catch DiskFileNotExist.
+                        # We raise an exception with a meaningful name for
+                        # correctness.
+                        logging.warn("Container dir %s does not exist",
+                                     self._container_path)
+                        raise DiskFileContainerDoesNotExist
+                elif attempts > 1:
+                    # Got ENOENT after previously making the path. This could
+                    # also be a FUSE issue or some race condition, nap and
+                    # retry.
+                    _random_sleep()
+                    logging.warn("DiskFile.create(): %s ... retrying in"
+                                 " 0.1 secs" % gerr)
+                    attempts += 1
+                else:
+                    # It looks like the path to the object does not already
+                    # exist; don't count this as an attempt, though, since
+                    # we perform the open() system call optimistically.
+                    self._create_dir_object(self._obj_path)
+            else:
+                self._fd = fd
+                self._tmppath = tmppath
+                break
+
+        return self
+
     def close(self):
         """
         Close the file descriptor
@@ -270,6 +463,14 @@ class DiskFileWriter(object):
             do_close(self._fd)
             self._fd = None
 
+    def chunks_finished(self):
+        """
+        Expose internal stats about written chunks.
+
+        :returns: a tuple, (upload_size, etag)
+        """
+        return self._upload_size, self._chunks_etag.hexdigest()
+
     def write(self, chunk):
         """
         Write a chunk of data to disk.
@@ -277,17 +478,15 @@ class DiskFileWriter(object):
         For this implementation, the data is written into a temporary file.
 
         :param chunk: the chunk of data to write as a string object
-
-        :returns: the total number of bytes written to an object
         """
         df = self._disk_file
         df._threadpool.run_in_thread(self._write_entire_chunk, chunk)
-        return self._upload_size
 
     def _finalize_put(self, metadata):
         # Write out metadata before fsync() to ensure it is also forced to
         # disk.
-        write_metadata(self._fd, metadata)
+        if self._metadata_support:
+            write_metadata(self._fd, metadata)
 
         # We call fsync() before calling drop_cache() to lower the
         # amount of redundant work the drop cache code will perform on
@@ -330,12 +529,12 @@ class DiskFileWriter(object):
                                 self._tmppath, df._data_file))
                     else:
                         # Data file target name now has a bad path!
-                        dfstats = do_stat(df._put_datadir)
+                        dfstats = do_stat(self._put_datadir)
                         if not dfstats:
                             raise DiskFileError(
                                 'DiskFile.put(): path to object, %s, no'
                                 ' longer exists (targeted for %s)' % (
-                                    df._put_datadir, df._data_file))
+                                    self._put_datadir, df._data_file))
                         else:
                             if not stat.S_ISDIR(dfstats.st_mode):
                                 raise DiskFileError(
@@ -351,11 +550,11 @@ class DiskFileWriter(object):
                                     " stat('%s') following that succeeded:"
                                     " %r" % (
                                         self._tmppath, df._data_file, str(err),
-                                        df._put_datadir, dfstats))
+                                        self._put_datadir, dfstats))
                                 attempts += 1
                                 continue
                 else:
-                    raise NasConnectorFileSystemOSError(
+                    raise FileConnectorFileSystemOSError(
                         err.errno, "%s, rename('%s', '%s')" % (
                             err.strerror, self._tmppath, df._data_file))
             else:
@@ -381,7 +580,7 @@ class DiskFileWriter(object):
 
         if dir_is_object(metadata):
             df._threadpool.force_run_in_thread(
-                df._create_dir_object, df._data_file, metadata)
+                self._create_dir_object, df._data_file, metadata)
             return
 
         if df._stat and stat.S_ISDIR(df._stat.st_mode):
@@ -651,7 +850,7 @@ class DiskFile(object):
         # Writes are always performed to a temporary file
         try:
             self._fd = do_open(self._data_file, os.O_RDONLY | O_CLOEXEC)
-        except NasConnectorFileSystemOSError as err:
+        except FileConnectorFileSystemOSError as err:
             if err.errno in (errno.ENOENT, errno.ENOTDIR):
                 # If the file does exist, or some part of the path does not
                 # exist, raise the expected DiskFileNotExist
@@ -850,61 +1049,9 @@ class DiskFile(object):
         self._fd = None
         return dr
 
-    def _create_dir_object(self, dir_path, metadata=None):
-        """
-        Create a directory object at the specified path. No check is made to
-        see if the directory object already exists, that is left to the caller
-        (this avoids a potentially duplicate stat() system call).
-
-        The "dir_path" must be relative to its container, self._container_path.
-
-        The "metadata" object is an optional set of metadata to apply to the
-        newly created directory object. If not present, no initial metadata is
-        applied.
-
-        The algorithm used is as follows:
-
-          1. An attempt is made to create the directory, assuming the parent
-             directory already exists
-
-             * Directory creation races are detected, returning success in
-               those cases
-
-          2. If the directory creation fails because some part of the path to
-             the directory does not exist, then a search back up the path is
-             performed to find the first existing ancestor directory, and then
-             the missing parents are successively created, finally creating
-             the target directory
-        """
-        full_path = os.path.join(self._container_path, dir_path)
-        cur_path = full_path
-        stack = []
-        while True:
-            md = None if cur_path != full_path else metadata
-            ret, newmd = make_directory(cur_path, self._uid, self._gid, md)
-            if ret:
-                break
-            # Some path of the parent did not exist, so loop around and
-            # create that, pushing this parent on the stack.
-            if os.path.sep not in cur_path:
-                raise DiskFileError("DiskFile._create_dir_object(): failed to"
-                                    " create directory path while exhausting"
-                                    " path elements to create: %s" % full_path)
-            cur_path, child = cur_path.rsplit(os.path.sep, 1)
-            assert child
-            stack.append(child)
-
-        child = stack.pop() if stack else None
-        while child:
-            cur_path = os.path.join(cur_path, child)
-            md = None if cur_path != full_path else metadata
-            ret, newmd = make_directory(cur_path, self._uid, self._gid, md)
-            if not ret:
-                raise DiskFileError("DiskFile._create_dir_object(): failed to"
-                                    " create directory path to target, %s,"
-                                    " on subpath: %s" % (full_path, cur_path))
-            child = stack.pop() if stack else None
-        return True, newmd
+    def writer(self, size=None):
+        return DiskFileWriter(self._obj, self._obj_path,
+                              self._put_datadir, size, self)
 
     @contextmanager
     def create(self, size=None):
@@ -930,108 +1077,9 @@ class DiskFile(object):
         :raises AlreadyExistsAsFile: if path or part of a path is not a \
                                      directory
         """
-        data_file = os.path.join(self._put_datadir, self._obj)
-
-        # Assume the full directory path exists to the file already, and
-        # construct the proper name for the temporary file.
-        fd = None
-        attempts = 1
-        while True:
-            tmpfile = '.' + self._obj + '.' + uuid4().hex
-            tmppath = os.path.join(self._put_datadir, tmpfile)
-            try:
-                fd = do_open(tmppath,
-                             os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_CLOEXEC)
-            except NasConnectorFileSystemOSError as gerr:
-                if gerr.errno in (errno.ENOSPC, errno.EDQUOT):
-                    # Raise DiskFileNoSpace to be handled by upper layers when
-                    # there is no space on disk OR when quota is exceeded
-                    raise DiskFileNoSpace()
-                if gerr.errno == errno.ENOTDIR:
-                    raise AlreadyExistsAsFile('do_open(): failed on %s,'
-                                              '  path or part of a'
-                                              ' path is not a directory'
-                                              % (tmppath))
-
-                if gerr.errno not in (errno.ENOENT, errno.EEXIST, errno.EIO):
-                    # FIXME: Other cases we should handle?
-                    raise
-                if attempts >= MAX_OPEN_ATTEMPTS:
-                    # We failed after N attempts to create the temporary
-                    # file.
-                    raise DiskFileError('DiskFile.create(): failed to'
-                                        ' successfully create a temporary file'
-                                        ' without running into a name conflict'
-                                        ' after %d of %d attempts for: %s' % (
-                                            attempts, MAX_OPEN_ATTEMPTS,
-                                            data_file))
-                if gerr.errno == errno.EEXIST:
-                    # Retry with a different random number.
-                    attempts += 1
-                elif gerr.errno == errno.EIO:
-                    # FIXME: Possible FUSE issue or race condition, let's
-                    # sleep on it and retry the operation.
-                    _random_sleep()
-                    logging.warn("DiskFile.create(): %s ... retrying in"
-                                 " 0.1 secs", gerr)
-                    attempts += 1
-                elif not self._obj_path:
-                    # ENOENT
-                    # No directory hierarchy and the create failed telling us
-                    # the container or volume directory does not exist. This
-                    # could be a FUSE issue or some race condition, so let's
-                    # sleep a bit and retry.
-                    # Handle race:
-                    # This can be the issue when memcache has cached that the
-                    # container exists. If someone removes the container dir
-                    # from filesystem, it's not reflected in memcache. So
-                    # swift reports that the container exists and this code
-                    # tries to create a file in a directory that does not
-                    # exist. However, it's wrong to create the container here.
-                    _random_sleep()
-                    logging.warn("DiskFile.create(): %s ... retrying in"
-                                 " 0.1 secs", gerr)
-                    attempts += 1
-                    if attempts > 2:
-                        # Ideally we would want to return 404 indicating that
-                        # the container itself does not exist. Can't be done
-                        # though as the caller won't catch DiskFileNotExist.
-                        # We raise an exception with a meaningful name for
-                        # correctness.
-                        logging.warn("Container dir %s does not exist",
-                                     self._container_path)
-                        raise DiskFileContainerDoesNotExist
-                elif attempts > 1:
-                    # Got ENOENT after previously making the path. This could
-                    # also be a FUSE issue or some race condition, nap and
-                    # retry.
-                    _random_sleep()
-                    logging.warn("DiskFile.create(): %s ... retrying in"
-                                 " 0.1 secs" % gerr)
-                    attempts += 1
-                else:
-                    # It looks like the path to the object does not already
-                    # exist; don't count this as an attempt, though, since
-                    # we perform the open() system call optimistically.
-                    self._create_dir_object(self._obj_path)
-            else:
-                break
-        dw = None
+        dw = self.writer(size)
         try:
-            # Ensure it is properly owned before we make it available.
-            if not ((self._uid == DEFAULT_UID) and (self._gid == DEFAULT_GID)):
-                # If both UID and GID is -1 (default values), it has no effect.
-                # So don't do a fchown.
-                # Further, at the time of this writing, UID and GID information
-                # is not passed to DiskFile.
-                do_fchown(fd, self._uid, self._gid)
-            # NOTE: we do not perform the fallocate() call at all. We ignore
-            # it completely since at the time of this writing FUSE does not
-            # support it.
-            dw = DiskFileWriter(fd, tmppath, self)
-            # It's now the responsibility of DiskFileWriter to close this fd.
-            fd = None
-            yield dw
+            yield dw.open()
         finally:
             if dw:
                 dw.close()

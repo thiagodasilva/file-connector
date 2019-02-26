@@ -29,7 +29,7 @@ import threading as stdlib_threading
 import cPickle as pickle
 from cStringIO import StringIO
 import pickletools
-from file_connector.swift.common.exceptions import NasConnectorFileSystemIOError, \
+from file_connector.swift.common.exceptions import FileConnectorFileSystemIOError, \
     ThreadPoolDead
 from swift.common.exceptions import DiskFileNoSpace
 from swift.common.db import native_str_keys
@@ -428,7 +428,7 @@ def write_metadata(path_or_fd, metadata):
                               path_or_fd, err)
                 raise DiskFileNoSpace()
             else:
-                raise NasConnectorFileSystemIOError(
+                raise FileConnectorFileSystemIOError(
                     err.errno,
                     'setxattr("%s", %s, metastr)' % (path_or_fd, key))
         metastr = metastr[MAX_XATTR_SIZE:]
@@ -443,7 +443,7 @@ def clean_metadata(path_or_fd):
         except IOError as err:
             if err.errno == errno.ENODATA:
                 break
-            raise NasConnectorFileSystemIOError(
+            raise FileConnectorFileSystemIOError(
                 err.errno, 'removexattr("%s", %s)' % (path_or_fd, key))
         key += 1
 
@@ -535,7 +535,7 @@ def _update_list(path, cont_path, src_list, reg_file=True, object_count=0,
             try:
                 metadata = \
                     read_metadata(os.path.join(cont_path, obj_path, obj_name))
-            except NasConnectorFileSystemIOError as err:
+            except FileConnectorFileSystemIOError as err:
                 if err.errno in (errno.ENOENT, errno.ESTALE):
                     # object might have been deleted by another process
                     # since the src_list was originally built
@@ -854,7 +854,7 @@ def rmobjdir(dir_path, marker_dir_check=True):
             if marker_dir_check:
                 try:
                     metadata = read_metadata(fullpath)
-                except NasConnectorFileSystemIOError as err:
+                except FileConnectorFileSystemIOError as err:
                     if err.errno in (errno.ENOENT, errno.ESTALE):
                         # Ignore removal from another entity.
                         continue
