@@ -1,5 +1,4 @@
-#FROM swiftstack/picoswiftstack:6.17.0.0
-FROM pico-swiftstack:latest
+FROM swiftstack/picoswiftstack:6.18.0.0
 
 MAINTAINER Thiago da Silva <thiago@swiftstack.com>
 
