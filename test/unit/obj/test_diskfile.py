@@ -74,9 +74,11 @@ def _mapit(filename_or_fd):
     return stats.st_ino
 
 
-def _mock_read_metadata(filename_or_fd):
+def _mock_read_metadata(path, fd=None):
     global _metadata
-    ino = _mapit(filename_or_fd)
+    if fd:
+        path = fd
+    ino = _mapit(path)
     if ino in _metadata:
         md = _metadata[ino]
     else:
@@ -84,9 +86,11 @@ def _mock_read_metadata(filename_or_fd):
     return md
 
 
-def _mock_write_metadata(filename_or_fd, metadata):
+def _mock_write_metadata(path, metadata, fd=None):
     global _metadata
-    ino = _mapit(filename_or_fd)
+    if fd:
+        path = fd
+    ino = _mapit(path)
     _metadata[ino] = metadata
 
 
@@ -723,7 +727,6 @@ class TestDiskFile(unittest.TestCase):
         assert _metadata[_mapit(the_dir)][X_OBJECT_TYPE] == DIR_OBJECT
 
     def test_put_is_dir(self):
-        raise unittest.SkipTest("Skip until metadata writes are supported")
         the_path = os.path.join(self.td, "vol0", "bar")
         the_dir = os.path.join(the_path, "dir")
         os.makedirs(the_dir)
@@ -788,6 +791,8 @@ class TestDiskFile(unittest.TestCase):
         self.assertFalse(os.path.exists(tmppath))
 
     def test_put_without_metadata_support(self):
+        raise unittest.SkipTest("Skip for now until metadata persistence"
+                                " plans are settled")
         the_cont = os.path.join(self.td, "vol0", "bar")
         os.makedirs(the_cont)
         self.mgr.support_metadata = False
@@ -1135,7 +1140,7 @@ class TestDiskFile(unittest.TestCase):
             else:
                 self.fail("Expecting DiskFileNotExist")
             _m_do_fstat.assert_called_once_with(999)
-            _m_rmd.assert_called_once_with(999)
+            _m_rmd.assert_called_once_with(gdf._data_file, 999)
             _m_do_close.assert_called_once_with(999)
             self.assertFalse(gdf._fd)
             # Make sure ENOENT failure is logged

@@ -380,11 +380,11 @@ class DiskDir(DiskCommon):
 
         if not self.metadata:
             self.metadata = create_container_metadata(self.datadir)
-            #self.metadata = _read_metadata(self.datadir)
+            self.metadata = _read_metadata(self.datadir)
         else:
             if not validate_container(self.metadata):
                 self.metadata = create_container_metadata(self.datadir)
-                #self.metadata = _read_metadata(self.datadir)
+                self.metadata = _read_metadata(self.datadir)
 
     def update_status_changed_at(self, timestamp):
         return
@@ -485,6 +485,11 @@ class DiskDir(DiskCommon):
             obj_path = os.path.join(self.datadir, obj)
             try:
                 metadata = read_metadata(obj_path)
+
+                # FIXME: we need stat info to invalidate metadata in case
+                # file has changed. OTOH, we should not need this stat here
+                # because we can get it from scandir
+                info = do_stat(obj_path)
             except FileConnectorFileSystemIOError as err:
                 if err.errno in (errno.ENOENT, errno.ESTALE):
                     # obj might have been deleted by another process
@@ -492,13 +497,15 @@ class DiskDir(DiskCommon):
                     continue
                 else:
                     raise err
-            if not metadata or not validate_object(metadata):
+            if not metadata or not validate_object(metadata, info):
                 if delimiter == '/' and obj_path[-1] == delimiter:
                     clean_obj_path = obj_path[:-1]
                 else:
                     clean_obj_path = obj_path
                 try:
-                    metadata = create_object_metadata(clean_obj_path)
+                    metadata = create_object_metadata(
+                        clean_obj_path, stats=info, existing_meta=metadata,
+                        calculate_etag=False)
                 except OSError as e:
                     # FIXME - total hack to get upstream swift ported unit
                     # test cases working for now.
@@ -713,7 +720,7 @@ class DiskAccount(DiskCommon):
 
         if not self.metadata or not validate_account(self.metadata):
             self.metadata = create_account_metadata(self.datadir)
-            #self.metadata = _read_metadata(self.datadir)
+            self.metadata = _read_metadata(self.datadir)
 
     def is_status_deleted(self):
         """
@@ -726,7 +733,7 @@ class DiskAccount(DiskCommon):
 
     def initialize(self, timestamp):
         """
-        Create and write metatdata to directory/account.
+        Create and write metadata to directory/account.
         :param metadata: Metadata to write.
         """
         metadata = get_account_metadata(self.datadir)

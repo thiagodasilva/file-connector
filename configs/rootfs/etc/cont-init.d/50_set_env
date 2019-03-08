@@ -1,5 +1,6 @@
 #!/usr/bin/with-contenv sh
 
 crudini --set /etc/swift/proxy-server.conf filter:tempauth user_fileconnector_fcuser "$FILE_CONNECTOR_SECRET .admin .reseller_admin"
-crudini --set /etc/swift/object-server.conf app:object-server write_metadata "${WRITE_METADATA:-true}"
+crudini --set /etc/swift/object-server.conf app:object-server persist_metadata "${PERSIST_METADATA:-true}"
+crudini --set /etc/swift/container-server.conf app:container-server persist_metadata "${PERSIST_METADATA:-true}"
 

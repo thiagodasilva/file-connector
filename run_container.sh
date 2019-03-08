@@ -5,9 +5,9 @@
 
 docker container prune -f
 docker run -d \
-    -v /home/thiago/file_connector_write:/srv/fileconnector/test \
+    -v /home/thiago/file_connector_write:/srv/fileconnector/srctest \
     -p 8083:8083 \
     -e FILE_CONNECTOR_SECRET=password \
     -e WRITE_METADATA=true \
     --name file-connector \
-    file-connector
+    file-connector:dev

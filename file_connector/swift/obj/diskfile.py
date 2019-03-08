@@ -44,7 +44,7 @@ from file_connector.swift.common.fs_utils import do_fstat, do_open, do_close, \
     do_fadvise64, do_rename, do_fdatasync, do_lseek, do_mkdir
 from file_connector.swift.common.utils import read_metadata, write_metadata, \
     validate_object, create_object_metadata, rmobjdir, dir_is_object, \
-    get_object_metadata
+    get_object_metadata, XattrMetadataPersistence
 from file_connector.swift.common.utils import X_CONTENT_TYPE, \
     X_TIMESTAMP, X_TYPE, X_OBJECT_TYPE, FILE, OBJECT, DIR_TYPE, \
     FILE_TYPE, DEFAULT_UID, DEFAULT_GID, DIR_NON_OBJECT, DIR_OBJECT, \
@@ -63,7 +63,7 @@ def _random_sleep():
     sleep(random.uniform(0.5, 0.15))
 
 
-def make_directory(full_path, uid, gid, metadata=None, metadata_support=True):
+def make_directory(full_path, uid, gid, metadata=None, persist_metadata=True):
     """
     Make a directory and change the owner ship as specified, and potentially
     creating the object metadata if requested.
@@ -157,7 +157,7 @@ def make_directory(full_path, uid, gid, metadata=None, metadata_support=True):
             raise DiskFileError("make_directory: mkdir failed on"
                                 " path %s (%s)" % (full_path, str(err)))
     else:
-        if metadata and metadata_support:
+        if metadata and persist_metadata:
             # We were asked to set the initial metadata for this object.
             metadata_orig = get_object_metadata(full_path)
             metadata_orig.update(metadata)
@@ -219,8 +219,8 @@ class DiskFileManager(SwiftDiskFileManager):
     def __init__(self, conf, logger):
         super(DiskFileManager, self).__init__(conf, logger)
         threads_per_disk = int(conf.get('threads_per_disk', '0'))
-        self.support_metadata = config_true_value(
-            conf.get('write_metadata', 'true'))
+        self.persist_metadata = config_true_value(
+            conf.get('persist_metadata', 'true'))
         self.threadpools = defaultdict(
             lambda: ThreadPool(nthreads=threads_per_disk))
 
@@ -269,7 +269,7 @@ class DiskFileWriter(object):
         self._put_datadir = datadir
         self._size = size
         self._disk_file = disk_file
-        self._metadata_support = self._disk_file._mgr.support_metadata
+        self._persist_metadata = self._disk_file._mgr.persist_metadata
 
         # Internal attributes
         self._chunks_etag = md5()
@@ -323,7 +323,7 @@ class DiskFileWriter(object):
         while True:
             md = None if cur_path != full_path else metadata
             ret, newmd = make_directory(cur_path, df._uid, df._gid, md,
-                                        self._metadata_support)
+                                        self._persist_metadata)
             if ret:
                 break
             # Some path of the parent did not exist, so loop around and
@@ -342,7 +342,7 @@ class DiskFileWriter(object):
             cur_path = os.path.join(cur_path, child)
             md = None if cur_path != full_path else metadata
             ret, newmd = make_directory(cur_path, df._uid, df._gid, md,
-                                        self._metadata_support)
+                                        self._persist_metadata)
             if not ret:
                 raise DiskFileError("DiskFileWriter._create_dir_object():"
                                     " failed to create directory path"
@@ -485,8 +485,9 @@ class DiskFileWriter(object):
     def _finalize_put(self, metadata):
         # Write out metadata before fsync() to ensure it is also forced to
         # disk.
-        if self._metadata_support:
-            write_metadata(self._fd, metadata)
+        if self._persist_metadata:
+            data_file = os.path.join(self._put_datadir, self._obj)
+            write_metadata(data_file, metadata, self._fd)
 
         # We call fsync() before calling drop_cache() to lower the
         # amount of redundant work the drop cache code will perform on
@@ -786,6 +787,7 @@ class DiskFile(object):
 
         self._data_file = os.path.join(self._put_datadir, self._obj)
         self._disk_file_open = False
+        self._mp = XattrMetadataPersistence(dev_path)
 
     @property
     def timestamp(self):
@@ -862,7 +864,7 @@ class DiskFile(object):
             obj_size = self._stat.st_size
 
             if not self._metadata:
-                self._metadata = read_metadata(self._fd)
+                self._metadata = read_metadata(self._data_file, self._fd)
             if not validate_object(self._metadata, self._stat):
                 self._metadata = create_object_metadata(self._fd, self._stat,
                                                         self._metadata)
