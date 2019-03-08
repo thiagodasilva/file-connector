@@ -342,7 +342,6 @@ class TestDiskCommon(unittest.TestCase):
         assert dc.is_deleted() == False
 
     def test_update_metadata(self):
-        raise unittest.SkipTest('Updating metadata is not supported for now')
         dc = dd.DiskCommon(self.td, self.fake_drives[0],
                            self.fake_accounts[0], self.fake_logger)
         utils.create_container_metadata(dc.datadir)
@@ -906,9 +905,7 @@ class TestContainerBroker(unittest.TestCase):
             listing = broker.list_objects_iter(500, '', None, None, '')
             self.assertEquals(len(listing), 100)
         # 10 getxattr() calls for 10 directories and 100 more for 100 objects
-        # TODO: fix this once write metadata is enabled
-        # self.assertEqual(_m_r_md.call_count, 10)
-        self.assertEqual(_m_r_md.call_count, 10)
+        self.assertEqual(_m_r_md.call_count, 110)
 
     def test_double_check_trailing_delimiter(self):
         # Test swift.common.db.ContainerBroker.list_objects_iter for a
@@ -1479,9 +1476,8 @@ class TestDiskAccount(unittest.TestCase):
             'X-Object-Count': (0, 0),
             'X-Type': ('Account', 0),
             'X-PUT-Timestamp': (normalize_timestamp(mtime), 0),
-            'X-Container-Count': (0, 0)}
-            #TODO: remove this for now as it requires support for write
-            #'fake-drv-1': (True, 0)}
+            'X-Container-Count': (0, 0),
+            'fake-drv-1': (True, 0)}
         assert da.metadata == exp_md, repr(da.metadata)
 
     def test_constructor_metadata_valid(self):

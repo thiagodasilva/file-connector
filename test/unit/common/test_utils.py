@@ -271,7 +271,6 @@ class TestUtils(unittest.TestCase):
             self.fail("Expected an IOError exception on remove")
 
     def test_read_metadata(self):
-        raise unittest.SkipTest('Skip until writing metadata is supported')
         path = "/tmp/foo/r"
         expected_d = {'a': 'y'}
         xkey = _xkey(path, utils.METADATA_KEY)
@@ -282,14 +281,12 @@ class TestUtils(unittest.TestCase):
         assert _xattr_op_cnt['get'] == 1, "%r" % _xattr_op_cnt
 
     def test_read_metadata_notfound(self):
-        raise unittest.SkipTest('Skip until writing metadata is supported')
         path = "/tmp/foo/r"
         res_d = utils.read_metadata(path)
         assert res_d == {}
         assert _xattr_op_cnt['get'] == 1, "%r" % _xattr_op_cnt
 
     def test_read_metadata_err(self):
-        raise unittest.SkipTest('Skip until writing metadata is supported')
         path = "/tmp/foo/r"
         expected_d = {'a': 'y'}
         xkey = _xkey(path, utils.METADATA_KEY)
@@ -304,7 +301,6 @@ class TestUtils(unittest.TestCase):
             self.fail("Expected an IOError exception on get")
 
     def test_read_metadata_multiple(self):
-        raise unittest.SkipTest('Skip until writing metadata is supported')
         path = "/tmp/foo/r"
         expected_d = {'a': 'y' * 150000}
         expected_p = serialize_metadata(expected_d)
@@ -319,7 +315,6 @@ class TestUtils(unittest.TestCase):
         assert _xattr_op_cnt['get'] == 4, "%r" % _xattr_op_cnt
 
     def test_read_metadata_multiple_one_missing(self):
-        raise unittest.SkipTest('Skip until writing metadata is supported')
         path = "/tmp/foo/r"
         expected_d = {'a': 'y' * 150000}
         expected_p = serialize_metadata(expected_d)
@@ -525,7 +520,6 @@ class TestUtils(unittest.TestCase):
             os.rmdir(td)
 
     def test_create_object_metadata_file(self):
-        raise unittest.SkipTest('Skip until writing metadata is supported')
         tf = tempfile.NamedTemporaryFile()
         tf.file.write('4567')
         tf.file.flush()
@@ -549,7 +543,6 @@ class TestUtils(unittest.TestCase):
         assert md[utils.X_ETAG] == utils._get_etag(tf.name)
 
     def test_create_object_metadata_dir(self):
-        raise unittest.SkipTest('Skip until writing metadata is supported')
         td = tempfile.mkdtemp()
         try:
             r_md = utils.create_object_metadata(td)
@@ -627,7 +620,6 @@ class TestUtils(unittest.TestCase):
                  utils.X_OBJECTS_COUNT, utils.X_BYTES_USED]
 
     def test_create_container_metadata(self):
-        raise unittest.SkipTest('Skip until writing metadata is supported')
         td = tempfile.mkdtemp()
         try:
             r_md = utils.create_container_metadata(td)
@@ -656,7 +648,6 @@ class TestUtils(unittest.TestCase):
     acct_keys.append(utils.X_CONTAINER_COUNT)
 
     def test_create_account_metadata(self):
-        raise unittest.SkipTest('Skip until writing metadata is supported')
         td = tempfile.mkdtemp()
         try:
             r_md = utils.create_account_metadata(td)
@@ -915,7 +906,6 @@ class TestUtilsDirObjects(unittest.TestCase):
         self.assertTrue(utils.rmobjdir(self.rootdir))
 
     def test_rmobjdir_removing_dirs(self):
-        raise unittest.SkipTest('Skip until writing metadata is supported')
         self.assertFalse(utils.rmobjdir(self.rootdir))
 
         # Remove the files

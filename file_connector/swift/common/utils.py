@@ -366,7 +366,7 @@ def deserialize_metadata(metastr):
         return {}
 
 
-def read_metadata(path_or_fd):
+def read_metadata(path, fd=None):
     """
     Helper function to read the serialized metadata from a File/Directory.
 
@@ -374,7 +374,12 @@ def read_metadata(path_or_fd):
 
     :returns: dictionary of metadata
     """
-    return {}
+    if fd:
+        path = fd
+    return read_metadata_from_xattr(path)
+
+
+def read_metadata_from_xattr(path_or_fd):
     metastr = ''
     key = 0
     try:
@@ -402,13 +407,26 @@ def read_metadata(path_or_fd):
     return metadata
 
 
-def write_metadata(path_or_fd, metadata):
+def write_metadata(path, metadata, fd=None):
     """
     Helper function to write serialized metadata for a File/Directory.
 
-    :param path_or_fd: File/Directory path or fd to write the metadata
+    :param path: File/Directory path to write the metadata
     :param metadata: dictionary of metadata write
+    :param fd: file descriptor to write the metadata, when fd is passed in
+               it will be used instead of path
     """
+    if fd:
+        path = fd
+
+    md = metadata.copy()
+    if md.get(X_ETAG) and md[X_ETAG].endswith('-fetag'):
+        del md[X_ETAG]
+
+    write_metadata_to_xattr(path, md)
+
+
+def write_metadata_to_xattr(path_or_fd, metadata):
     assert isinstance(metadata, dict)
     metastr = serialize_metadata(metadata)
     key = 0
@@ -710,7 +728,7 @@ def _get_etag(path_or_fd):
     return etag
 
 
-def get_object_metadata(obj_path_or_fd, stats=None):
+def get_object_metadata(obj_path_or_fd, stats=None, calculate_etag=True):
     """
     Return metadata of object.
     """
@@ -728,13 +746,17 @@ def get_object_metadata(obj_path_or_fd, stats=None):
         metadata = {}
     else:
         is_dir = stat.S_ISDIR(stats.st_mode)
+        if calculate_etag:
+            etag = md5().hexdigest() if is_dir else _get_etag(obj_path_or_fd)
+        else:
+            etag = '0000000000000000000000000000000-fetag'
         metadata = {
             X_TYPE: OBJECT,
             X_TIMESTAMP: normalize_timestamp(stats.st_ctime),
             X_CONTENT_TYPE: DIR_TYPE if is_dir else FILE_TYPE,
             X_OBJECT_TYPE: DIR_NON_OBJECT if is_dir else FILE,
             X_CONTENT_LENGTH: 0 if is_dir else stats.st_size,
-            X_ETAG: md5().hexdigest() if is_dir else _get_etag(obj_path_or_fd)}
+            X_ETAG: etag}
     return metadata
 
 
@@ -795,24 +817,39 @@ def restore_metadata(path, metadata, meta_orig):
     return meta_new
 
 
-def create_object_metadata(obj_path_or_fd, stats=None, existing_meta={}):
+def create_object_metadata(obj_path_or_fd, stats=None, existing_meta={},
+                           calculate_etag=True):
     # We must accept either a path or a file descriptor as an argument to this
     # method, as the diskfile modules uses a file descriptior and the DiskDir
     # module (for container operations) uses a path.
-    return get_object_metadata(obj_path_or_fd, stats)
-    #return restore_metadata(obj_path_or_fd, metadata_from_stat, existing_meta)
+    #return get_object_metadata(obj_path_or_fd, stats, calculate_etag)
+
+    # TODO: while we don't support writing metadata to non xattr FS
+    # don't restore_metadata
+    metadata_from_stat = get_object_metadata(obj_path_or_fd, stats,
+                                             calculate_etag)
+
+    return restore_metadata(obj_path_or_fd,
+                            metadata_from_stat, existing_meta)
 
 
 def create_container_metadata(cont_path):
-    return get_container_metadata(cont_path)
-    #rmd = restore_metadata(cont_path, metadata, {})
-    #return rmd
+    #return get_container_metadata(cont_path)
+
+    # TODO: while we don't support writing metadata to non xattr FS
+    # don't restore_metadata
+    metadata = get_container_metadata(cont_path)
+    rmd = restore_metadata(cont_path, metadata, {})
+    return rmd
 
 
 def create_account_metadata(acc_path):
-    return get_account_metadata(acc_path)
-    #rmd = restore_metadata(acc_path, metadata, {})
-    #return rmd
+    #return get_account_metadata(acc_path)
+    # TODO: while we don't support writing metadata to non xattr FS
+    # don't restore_metadata
+    metadata = get_account_metadata(acc_path)
+    rmd = restore_metadata(acc_path, metadata, {})
+    return rmd
 
 
 # The following dir_xxx calls should definitely be replaced
@@ -892,33 +929,94 @@ def rmobjdir(dir_path, marker_dir_check=True):
         return True
 
 
-def write_pickle(obj, dest, tmp=None, pickle_protocol=0):
-    """
-    Ensure that a pickle file gets written to disk.  The file is first written
-    to a tmp file location in the destination directory path, ensured it is
-    synced to disk, then moved to its final destination name.
+class XattrMetadataPersistence(object):
+    def __init__(self, dev_path):
+        self.dev_path = dev_path
 
-    :param obj: python object to be pickled
-    :param dest: path of final destination file
-    :param tmp: path to tmp to use, defaults to None (ignored)
-    :param pickle_protocol: protocol to pickle the obj with, defaults to 0
-    """
-    dirname = os.path.dirname(dest)
-    # Create destination directory
-    try:
-        os.makedirs(dirname)
-    except OSError as err:
-        if err.errno != errno.EEXIST:
-            raise
-    basename = os.path.basename(dest)
-    tmpname = '.' + basename + '.' + \
-        md5(basename + str(random.random())).hexdigest()
-    tmppath = os.path.join(dirname, tmpname)
-    with open(tmppath, 'wb') as fo:
-        pickle.dump(obj, fo, pickle_protocol)
-        fo.flush()
-        do_fsync(fo)
-    do_rename(tmppath, dest)
+    def read_metadata(path, fd=None):
+        """
+        Helper function to read the serialized metadata from a File/Directory.
+
+        :param path: File/Directory path from which to read metadata.
+        :param fd: File descriptor from which to read metadata. If fd is
+                   passed in, path is ignored.
+
+        :returns: dictionary of metadata
+        """
+        if fd:
+            path = fd
+        return read_metadata_from_xattr(path)
+
+    def read_metadata_from_xattr(path_or_fd):
+        metastr = ''
+        key = 0
+        try:
+            while True:
+                metastr += do_getxattr(path_or_fd, '%s%s' %
+                                       (METADATA_KEY, (key or '')))
+                key += 1
+                if len(metastr) < MAX_XATTR_SIZE:
+                    # Prevent further getxattr calls
+                    break
+        except IOError as err:
+            if err.errno != errno.ENODATA:
+                raise
+
+        if not metastr:
+            return {}
+
+        metadata = deserialize_metadata(metastr)
+        if not metadata:
+            # Empty dict i.e deserializing of metadata has failed, probably
+            # because it is invalid or incomplete or corrupt
+            clean_metadata(path_or_fd)
+
+        assert isinstance(metadata, dict)
+        return metadata
+
+    def write_metadata(path, metadata, fd=None):
+        """
+        Helper function to write serialized metadata for a File/Directory.
+
+        :param path: File/Directory path to write the metadata
+        :param metadata: dictionary of metadata write
+        :param fd: file descriptor to write the metadata, when fd is passed in
+                   it will be used instead of path
+        """
+        if fd:
+            path = fd
+
+        md = metadata.copy()
+        if md.get(X_ETAG) and md[X_ETAG].endswith('-fetag'):
+            del md[X_ETAG]
+
+        write_metadata_to_xattr(path, md)
+
+    def write_metadata_to_xattr(path_or_fd, metadata):
+        assert isinstance(metadata, dict)
+        metastr = serialize_metadata(metadata)
+        key = 0
+        while metastr:
+            try:
+                do_setxattr(path_or_fd,
+                            '%s%s' % (METADATA_KEY, key or ''),
+                            metastr[:MAX_XATTR_SIZE])
+            except IOError as err:
+                if err.errno in (errno.ENOSPC, errno.EDQUOT):
+                    if isinstance(path_or_fd, int):
+                        filename = get_filename_from_fd(path_or_fd)
+                        do_log_rl("write_metadata(%d, md) failed: %s : %s",
+                                  path_or_fd, err, filename)
+                    else:
+                        do_log_rl("write_metadata(%s, md) failed: %s",
+                                  path_or_fd, err)
+                    raise DiskFileNoSpace()
+                else:
+                    raise FileConnectorFileSystemIOError(
+                        err.errno,
+                        'setxattr("%s", %s, metastr)' % (path_or_fd, key))
+            metastr = metastr[MAX_XATTR_SIZE:]
+            key += 1
 
 
 DT_UNKNOWN = 0
