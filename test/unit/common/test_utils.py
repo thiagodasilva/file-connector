@@ -26,10 +26,11 @@ import tarfile
 import shutil
 import cPickle as pickle
 from collections import defaultdict
-from mock import patch, Mock
+from mock import patch, mock_open, Mock
 from file_connector.swift.common import utils
 from file_connector.swift.common.utils import deserialize_metadata, \
-    serialize_metadata, PICKLE_PROTOCOL, XattrMetadataPersistence
+    serialize_metadata, PICKLE_PROTOCOL, XattrMetadataPersistence, \
+    JsonMetadataPersistence
 from file_connector.swift.common.exceptions import FileConnectorFileSystemOSError,\
     FileConnectorFileSystemIOError
 from swift.common.exceptions import DiskFileNoSpace
@@ -174,6 +175,125 @@ class TestSafeUnpickler(unittest.TestCase):
                     self.fail("Expecting cPickle.UnpicklingError")
 
 
+class TestJsonMetadataPersistence(unittest.TestCase):
+    def setUp(self):
+        self.mp = JsonMetadataPersistence('/srv/fc')
+
+    def tearDown(self):
+        pass
+
+    def test_get_metadata_dir_obj(self):
+        path = "/srv/fc/cont/obj"
+        expected_dir = os.path.join('/srv/fc/cont', self.mp.meta_dir, 'obj')
+        expected_file = os.path.join('/srv/fc/cont', self.mp.meta_dir, 'obj',
+                                     self.mp.obj_meta)
+        dir_path, file_path = self.mp._get_metadata_dir(path)
+
+        self.assertEqual(expected_dir, dir_path)
+        self.assertEqual(expected_file, file_path)
+
+        # subdirs sanity
+        path = "/srv/fc/cont/subdir1/subdir2/obj"
+        expected_dir = os.path.join('/srv/fc/cont/subdir1/subdir2',
+                                    self.mp.meta_dir, 'obj')
+        expected_file = os.path.join('/srv/fc/cont/subdir1/subdir2',
+                                     self.mp.meta_dir, 'obj',
+                                     self.mp.obj_meta)
+        dir_path, file_path = self.mp._get_metadata_dir(path)
+
+        self.assertEqual(expected_dir, dir_path)
+        self.assertEqual(expected_file, file_path)
+
+    def test_get_metadata_dir_cont(self):
+        path = "/srv/fc/cont"
+        expected_dir = os.path.join('/srv/fc/cont', self.mp.meta_dir)
+        expected_file = os.path.join('/srv/fc/cont', self.mp.meta_dir,
+                                     self.mp.cont_meta)
+        dir_path, file_path = self.mp._get_metadata_dir(path)
+
+        self.assertEqual(expected_dir, dir_path)
+        self.assertEqual(expected_file, file_path)
+
+    def test_write_metadata(self):
+        path = "/tmp/foo/cont/obj"
+        md_file = os.path.join('/tmp/foo/cont', self.mp.meta_dir,
+                               'obj', self.mp.obj_meta)
+        orig_d = {'bar': 'foo'}
+        self.mp.write_metadata(path, orig_d)
+        try:
+            with open(md_file, 'rt') as f:
+                md = utils.deserialize_metadata(f.read())
+        except Exception as e:
+            self.fail(e)
+
+        expected_md = {'bar': 'foo',
+                       'metadata_version': self.mp.metadata_version}
+        self.assertEqual(expected_md, md)
+
+    def test_write_metadata_etag(self):
+        # don't store fake etag
+        path = "/tmp/foo/cont/obj"
+        md_file = os.path.join('/tmp/foo/cont', self.mp.meta_dir,
+                               'obj', self.mp.obj_meta)
+        orig_d = {'bar': 'foo', 'ETag': 'bla-fetag'}
+        self.mp.write_metadata(path, orig_d)
+        try:
+            with open(md_file, 'rt') as f:
+                md = utils.deserialize_metadata(f.read())
+        except Exception as e:
+            self.fail(e)
+
+        # but store a real etag
+        expected_md = {'bar': 'foo',
+                       'metadata_version': self.mp.metadata_version}
+        self.assertEqual(expected_md, md)
+
+        orig_d = {'bar': 'foo', 'ETag': 'realetag'}
+        self.mp.write_metadata(path, orig_d)
+        try:
+            with open(md_file, 'rt') as f:
+                md = utils.deserialize_metadata(f.read())
+        except Exception as e:
+            self.fail(e)
+
+        expected_md = {'bar': 'foo', 'ETag': 'realetag',
+                       'metadata_version': self.mp.metadata_version}
+        self.assertEqual(expected_md, md)
+
+    def test_write_metadata_write_fail_nospace(self):
+        write_mock = Mock(side_effect=IOError(errno.ENOSPC, "fail"))
+        path = "/tmp/foo/cont/obj"
+        orig_d = {'bar': 'foo'}
+        mo = mock_open()
+        with patch('__builtin__.open', mo):
+            mock_file = mo.return_value
+            mock_file.write = write_mock
+            self.assertRaises(
+                DiskFileNoSpace,
+                self.mp.write_metadata, path, orig_d)
+
+    def test_write_metadata_write_fail(self):
+        write_mock = Mock(side_effect=IOError(errno.EIO, "fail"))
+        path = "/tmp/foo/cont/obj"
+        orig_d = {'bar': 'foo'}
+        mo = mock_open()
+        with patch('__builtin__.open', mo):
+            mock_file = mo.return_value
+            mock_file.write = write_mock
+            self.assertRaises(
+                FileConnectorFileSystemIOError,
+                self.mp.write_metadata, path, orig_d)
+
+    def test_write_metadata_rename_fail(self):
+        rename_mock = Mock(side_effect=OSError('failed rename'))
+        path = "/tmp/foo/cont/obj"
+        orig_d = {'bar': 'foo'}
+        with patch('os.rename', rename_mock):
+            self.assertRaises(
+                FileConnectorFileSystemOSError,
+                self.mp.write_metadata, path, orig_d)
+
+
 class TestUtils(unittest.TestCase):
     """ Tests for common.utils """
 
@@ -189,10 +309,11 @@ class TestUtils(unittest.TestCase):
         orig_d = {'bar': 'foo'}
         self.mp.write_metadata(path, orig_d)
         xkey = _xkey(path, utils.METADATA_KEY)
-        assert len(_xattrs.keys()) == 1
-        assert xkey in _xattrs
-        assert orig_d == deserialize_metadata(_xattrs[xkey])
-        assert _xattr_op_cnt['set'] == 1
+        self.assertEqual(1, len(_xattrs))
+        self.assertIn(xkey, _xattrs)
+        orig_d['metadata_version'] = self.mp.metadata_version
+        self.assertEqual(orig_d, deserialize_metadata(_xattrs[xkey]))
+        self.assertEqual(_xattr_op_cnt['set'], 1)
 
     def test_write_metadata_err(self):
         path = "/tmp/foo/w"
@@ -243,6 +364,7 @@ class TestUtils(unittest.TestCase):
             assert xkey in _xattrs
             assert len(_xattrs[xkey]) <= utils.MAX_XATTR_SIZE
             payload += _xattrs[xkey]
+        orig_d['metadata_version'] = self.mp.metadata_version
         assert orig_d == deserialize_metadata(payload)
         assert _xattr_op_cnt['set'] == 3, "%r" % _xattr_op_cnt
 
@@ -525,13 +647,14 @@ class TestUtils(unittest.TestCase):
         tf.file.write('4567')
         tf.file.flush()
         r_md = self.mp.create_object_metadata(tf.name)
+        r_md['metadata_version'] = self.mp.metadata_version
 
         xkey = _xkey(tf.name, utils.METADATA_KEY)
         assert len(_xattrs.keys()) == 1
         assert xkey in _xattrs
         assert _xattr_op_cnt['set'] == 1
         md = deserialize_metadata(_xattrs[xkey])
-        assert r_md == md
+        self.assertEqual(r_md, md)
 
         for key in self.obj_keys:
             assert key in md, "Expected key %s in %r" % (key, md)
@@ -547,6 +670,7 @@ class TestUtils(unittest.TestCase):
         td = tempfile.mkdtemp()
         try:
             r_md = self.mp.create_object_metadata(td)
+            r_md['metadata_version'] = self.mp.metadata_version
 
             xkey = _xkey(td, utils.METADATA_KEY)
             assert len(_xattrs.keys()) == 1
@@ -624,6 +748,7 @@ class TestUtils(unittest.TestCase):
         td = tempfile.mkdtemp()
         try:
             r_md = self.mp.create_container_metadata(td)
+            r_md['metadata_version'] = self.mp.metadata_version
 
             xkey = _xkey(td, utils.METADATA_KEY)
             assert len(_xattrs.keys()) == 1
@@ -652,6 +777,7 @@ class TestUtils(unittest.TestCase):
         td = tempfile.mkdtemp()
         try:
             r_md = self.mp.create_account_metadata(td)
+            r_md['metadata_version'] = self.mp.metadata_version
 
             xkey = _xkey(td, utils.METADATA_KEY)
             assert len(_xattrs.keys()) == 1

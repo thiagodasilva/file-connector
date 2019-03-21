@@ -740,6 +740,7 @@ def rmobjdir(mp, dir_path, marker_dir_check=True):
 class MetadataPersistence(object):
     def __init__(self, dev_path):
         self.dev_path = dev_path
+        self.metadata_version = 1
 
     def read_metadata(self, path, fd=None):
         metastr = self._read_metadata(path, fd)
@@ -765,6 +766,7 @@ class MetadataPersistence(object):
         md = metadata.copy()
         if md.get(X_ETAG) and md[X_ETAG].endswith('-fetag'):
             del md[X_ETAG]
+        md['metadata_version'] = self.metadata_version
 
         self._write_metadata(path, md, fd)
 
@@ -863,30 +865,13 @@ class JsonMetadataPersistence(MetadataPersistence):
         self.meta_dir = '.fc_meta'
         self.obj_meta = 'obj_metadata.json'
         self.cont_meta = 'container_metadata.json'
-        self.metadata_version = 1
-
-    def _get_metadata_dir2(self, path):
-        path = path[len(self.dev_path):].strip('/')
-        path_parts = path.split('/', 1)
-        if len(path_parts) == 1:
-            meta_dir_path = os.path.join(
-                self.dev_path, path_parts[0], self.meta_dir)
-            meta_file_path = os.path.join(
-                self.dev_path, path_parts[0], self.meta_dir, self.cont_meta)
-        elif len(path_parts) == 2:
-            meta_dir_path = os.path.join(
-                self.dev_path, path_parts[0], self.meta_dir, path_parts[1])
-            meta_file_path = os.path.join(
-                self.dev_path, path_parts[0], self.meta_dir, path_parts[1],
-                self.obj_meta)
-        else:
-            # TODO handle error
-            meta_dir_path = ''
-            meta_file_path = ''
-
-        return meta_dir_path, meta_file_path
 
     def _get_metadata_dir(self, path):
+        '''
+        Given a path to object, return a tuple:
+        A path to the directory to where the json file will be stored
+        and a path to the metadata json file itself.
+        '''
         dir_path = os.path.dirname(path)
         obj_name = os.path.basename(path)
 
@@ -931,21 +916,23 @@ class JsonMetadataPersistence(MetadataPersistence):
         if not os.path.exists(meta_dir_path):
             mkdirs(meta_dir_path)
 
-        md = metadata.copy()
-        if md.get(X_ETAG) and md[X_ETAG].endswith('-fetag'):
-            del md[X_ETAG]
-        md['metadata_version'] = self.metadata_version
-
-        metastr = serialize_metadata(md)
+        metastr = serialize_metadata(metadata)
 
         tmpfile = meta_file_path + '_' + uuid4().hex
         try:
             # TODO check on open 'wt'
             with open(tmpfile, 'wt') as f:
                 f.write(metastr)
-        except Exception as err:
-            # TODO better error handling
-            raise
+        except IOError as err:
+            if err.errno in (errno.ENOSPC, errno.EDQUOT):
+                do_log_rl("_write_metadata failed: %s : %s",
+                          err, meta_file_path)
+                raise DiskFileNoSpace()
+            else:
+                raise FileConnectorFileSystemIOError(
+                    err.errno,
+                    '_write_metadata failed: %s : %s' %
+                    (err, meta_file_path))
 
         try:
             do_rename(tmpfile, meta_file_path)
