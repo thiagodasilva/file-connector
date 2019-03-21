@@ -20,14 +20,14 @@ import errno
 from file_connector.swift.common.fs_utils import dir_empty, mkdirs, do_chown, \
     do_exists, do_touch, do_stat
 from file_connector.swift.common.utils import validate_account, validate_container, \
-    get_container_details, get_account_details, create_container_metadata, \
-    create_account_metadata, DEFAULT_GID, get_container_metadata, \
+    get_container_details, get_account_details, \
+    DEFAULT_GID, \
     get_account_metadata, DEFAULT_UID, validate_object, \
-    create_object_metadata, read_metadata, write_metadata, X_CONTENT_TYPE, \
+    X_CONTENT_TYPE, \
     X_CONTENT_LENGTH, X_TIMESTAMP, X_PUT_TIMESTAMP, X_ETAG, X_OBJECTS_COUNT, \
     X_BYTES_USED, X_CONTAINER_COUNT, DIR_TYPE, rmobjdir, dir_is_object, \
     list_objects_gsexpiring_container, normalize_timestamp, \
-    _implicit_dir_objects, ThreadPool
+    _implicit_dir_objects, ThreadPool, get_metadata_persistence
 from swift.common import manager
 from file_connector.swift.common.exceptions import FileOrDirNotFoundError, \
     FileConnectorFileSystemIOError
@@ -45,24 +45,6 @@ _container_update_object_count = False
 _account_update_container_count = False
 
 
-def _read_metadata(dd):
-    """ Filter read metadata so that it always returns a tuple that includes
-        some kind of timestamp. With 1.4.8 of the Swift integration the
-        timestamps were not stored. Here we fabricate timestamps for volumes
-        where the existing data has no timestamp (that is, stored data is not
-        a tuple), allowing us a measure of backward compatibility.
-
-        FIXME: At this time it does not appear that the timestamps on each
-        metadata are used for much, so this should not hurt anything.
-    """
-    metadata_i = read_metadata(dd)
-    metadata = {}
-    timestamp = 0
-    for key, value in metadata_i.iteritems():
-        if not isinstance(value, tuple):
-            value = (value, timestamp)
-        metadata[key] = value
-    return metadata
 
 
 def filter_prefix(objects, prefix):
@@ -162,7 +144,7 @@ class DiskCommon(object):
     Common fields and methods shared between DiskDir and DiskAccount classes.
     """
     def __init__(self, root, drive, account, logger, pending_timeout=None,
-                 stale_reads_ok=False):
+                 stale_reads_ok=False, mp_mode=None):
         # WARNING: The following four fields are referenced as fields by our
         # callers outside of this module, do not remove.
         # Create a dummy db_file in manager.RUN_DIR
@@ -188,12 +170,33 @@ class DiskCommon(object):
         # passed as arg is run in a real external thread using eventlet.tpool
         # which has a threadpool of 20 threads (default)
         self.threadpool = ThreadPool(nthreads=0)
+        self._mp = get_metadata_persistence(self.datadir, mp_mode)
+
+    def _read_metadata(self, dd):
+        """
+        Filter read metadata so that it always returns a tuple that includes
+        some kind of timestamp. With 1.4.8 of the Swift integration the
+        timestamps were not stored. Here we fabricate timestamps for volumes
+        where the existing data has no timestamp (that is, stored data is not
+        a tuple), allowing us a measure of backward compatibility.
+
+        FIXME: At this time it does not appear that the timestamps on each
+        metadata are used for much, so this should not hurt anything.
+        """
+        metadata_i = self._mp.read_metadata(dd)
+        metadata = {}
+        timestamp = 0
+        for key, value in metadata_i.iteritems():
+            if not isinstance(value, tuple):
+                value = (value, timestamp)
+            metadata[key] = value
+        return metadata
 
     def _dir_exists_read_metadata(self):
         self._dir_exists = os.path.isdir(self.datadir)
         if self._dir_exists:
             try:
-                self.metadata = _read_metadata(self.datadir)
+               self.metadata = self._read_metadata(self.datadir)
             except FileConnectorFileSystemIOError as err:
                 if err.errno in (errno.ENOENT, errno.ESTALE):
                     return False
@@ -252,7 +255,7 @@ class DiskCommon(object):
             if validate_metadata:
                 self.validate_metadata(new_metadata)
             if new_metadata != self.metadata:
-                write_metadata(self.datadir, new_metadata)
+                self._mp.write_metadata(self.datadir, new_metadata)
                 self.metadata = new_metadata
 
 
@@ -379,12 +382,13 @@ class DiskDir(DiskCommon):
             return
 
         if not self.metadata:
-            self.metadata = create_container_metadata(self.datadir)
-            self.metadata = _read_metadata(self.datadir)
+            self.metadata = self._mp.create_container_metadata(self.datadir)
+            self.metadata = self._read_metadata(self.datadir)
         else:
             if not validate_container(self.metadata):
-                self.metadata = create_container_metadata(self.datadir)
-                self.metadata = _read_metadata(self.datadir)
+                self.metadata = self._mp.create_container_metadata(
+                    self.datadir)
+                self.metadata = self._read_metadata(self.datadir)
 
     def update_status_changed_at(self, timestamp):
         return
@@ -484,7 +488,7 @@ class DiskDir(DiskCommon):
         for obj in objects:
             obj_path = os.path.join(self.datadir, obj)
             try:
-                metadata = read_metadata(obj_path)
+                metadata = self._mp.read_metadata(obj_path)
 
                 # FIXME: we need stat info to invalidate metadata in case
                 # file has changed. OTOH, we should not need this stat here
@@ -503,7 +507,7 @@ class DiskDir(DiskCommon):
                 else:
                     clean_obj_path = obj_path
                 try:
-                    metadata = create_object_metadata(
+                    metadata = self._mp.create_object_metadata(
                         clean_obj_path, stats=info, existing_meta=metadata,
                         calculate_etag=False)
                 except OSError as e:
@@ -536,7 +540,8 @@ class DiskDir(DiskCommon):
         return container_list
 
     def _update_object_count(self):
-        objects, object_count, bytes_used = get_container_details(self.datadir)
+        objects, object_count, bytes_used = get_container_details(self.datadir,
+                                                                  self._mp)
 
         if X_OBJECTS_COUNT not in self.metadata \
                 or int(self.metadata[X_OBJECTS_COUNT][0]) != object_count \
@@ -544,7 +549,7 @@ class DiskDir(DiskCommon):
                 or int(self.metadata[X_BYTES_USED][0]) != bytes_used:
             self.metadata[X_OBJECTS_COUNT] = (object_count, 0)
             self.metadata[X_BYTES_USED] = (bytes_used, 0)
-            write_metadata(self.datadir, self.metadata)
+            self._mp.write_metadata(self.datadir, self.metadata)
 
         return objects
 
@@ -600,10 +605,10 @@ class DiskDir(DiskCommon):
             mkdirs(self.datadir)
             # If we create it, ensure we own it.
             do_chown(self.datadir, self.uid, self.gid)
-        metadata = get_container_metadata(self.datadir)
+        metadata = self._mp.get_container_metadata(self.datadir)
         metadata[X_TIMESTAMP] = (timestamp, 0)
         metadata[X_PUT_TIMESTAMP] = (timestamp, 0)
-        write_metadata(self.datadir, metadata)
+        self._mp.write_metadata(self.datadir, metadata)
         self.metadata = metadata
         self._dir_exists = True
 
@@ -623,7 +628,7 @@ class DiskDir(DiskCommon):
             existing_timestamp = self.metadata[X_PUT_TIMESTAMP][0]
             if timestamp > existing_timestamp:
                 self.metadata[X_PUT_TIMESTAMP] = (timestamp, 0)
-                write_metadata(self.datadir, self.metadata)
+                self._mp.write_metadata(self.datadir, self.metadata)
 
     def delete_object(self, name, timestamp, obj_policy_index):
         # NOOP - should never be called since object file removal occurs
@@ -639,7 +644,7 @@ class DiskDir(DiskCommon):
         # Let's check and see if it has directories that
         # where created by the code, but not by the
         # caller as objects
-        rmobjdir(self.datadir)
+        rmobjdir(self._mp, self.datadir)
         self._dir_exists = False
 
     def set_x_container_sync_points(self, sync_point1, sync_point2):
@@ -693,6 +698,12 @@ class DiskAccount(DiskCommon):
         super(DiskAccount, self).__init__(root, drive, account, logger,
                                           **kwargs)
 
+        # TODO this is a bit of a hack, since the account dir is always going
+        # as we are not really persisting account metadata just yet
+        # datadir == /srv/fileconnector, so this is container's filesystem
+        # which does support xattr. User's share is mounted under
+        # /srv/fileconnector/[share_name].
+        self._mp = get_metadata_persistence(self.datadir, 'xattr')
         if self.account == 'gsexpiring':
             # Do not bother updating object count, container count and bytes
             # used. Return immediately before metadata validation and
@@ -719,8 +730,8 @@ class DiskAccount(DiskCommon):
         assert self._dir_exists
 
         if not self.metadata or not validate_account(self.metadata):
-            self.metadata = create_account_metadata(self.datadir)
-            self.metadata = _read_metadata(self.datadir)
+            self.metadata = self._mp.create_account_metadata(self.datadir)
+            self.metadata = self._read_metadata(self.datadir)
 
     def is_status_deleted(self):
         """
@@ -738,7 +749,7 @@ class DiskAccount(DiskCommon):
         """
         metadata = get_account_metadata(self.datadir)
         metadata[X_TIMESTAMP] = (timestamp, 0)
-        write_metadata(self.datadir, metadata)
+        self._mp.write_metadata(self.datadir, metadata)
         self.metadata = metadata
 
     def update_put_timestamp(self, timestamp):
@@ -749,7 +760,7 @@ class DiskAccount(DiskCommon):
 
         if timestamp > self.metadata[X_PUT_TIMESTAMP][0]:
             self.metadata[X_PUT_TIMESTAMP] = (timestamp, 0)
-            write_metadata(self.datadir, self.metadata)
+            self._mp.write_metadata(self.datadir, self.metadata)
 
     def delete_db(self, timestamp):
         """
@@ -788,7 +799,7 @@ class DiskAccount(DiskCommon):
         if X_CONTAINER_COUNT not in self.metadata \
                 or int(self.metadata[X_CONTAINER_COUNT][0]) != container_count:
             self.metadata[X_CONTAINER_COUNT] = (container_count, 0)
-            write_metadata(self.datadir, self.metadata)
+            self._mp.write_metadata(self.datadir, self.metadata)
 
         return containers
 
@@ -871,10 +882,10 @@ class DiskAccount(DiskCommon):
             metadata = None
             list_item.append(cont)
             cont_path = os.path.join(self.datadir, cont)
-            metadata = _read_metadata(cont_path)
+            metadata = self._read_metadata(cont_path)
             if not metadata or not validate_container(metadata):
                 try:
-                    metadata = create_container_metadata(cont_path)
+                    metadata = self._mp.create_container_metadata(cont_path)
                 except OSError as e:
                     # FIXME - total hack to get upstream swift ported unit
                     # test cases working for now.

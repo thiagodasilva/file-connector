@@ -46,10 +46,6 @@ from test.unit import FakeLogger
 _metadata = {}
 
 
-def _get_diskfile(df_mgr, d, p, a, c, o, **kwargs):
-    return df_mgr.get_diskfile(d, p, a, c, o, **kwargs)
-
-
 def _create_and_get_diskfile(df_mgr, td, dev, par, acc, con, obj, fsize=256):
     # FIXME: assumes account === volume
     the_path = os.path.join(td, dev, con)
@@ -92,6 +88,13 @@ def _mock_write_metadata(path, metadata, fd=None):
         path = fd
     ino = _mapit(path)
     _metadata[ino] = metadata
+
+
+def _get_diskfile(df_mgr, d, p, a, c, o, **kwargs):
+    df = df_mgr.get_diskfile(d, p, a, c, o, **kwargs)
+    df._mp.write_metadata = _mock_write_metadata
+    df._mp.read_metadata = _mock_read_metadata
+    return df
 
 
 def _mock_clear_metadata():
@@ -166,14 +169,14 @@ class TestDiskFile(unittest.TestCase):
         self.lg = FakeLogger()
         _initxattr()
         _mock_clear_metadata()
-        self._saved_df_wm = file_connector.swift.obj.diskfile.write_metadata
-        self._saved_df_rm = file_connector.swift.obj.diskfile.read_metadata
-        file_connector.swift.obj.diskfile.write_metadata = _mock_write_metadata
-        file_connector.swift.obj.diskfile.read_metadata = _mock_read_metadata
-        self._saved_ut_wm = file_connector.swift.common.utils.write_metadata
-        self._saved_ut_rm = file_connector.swift.common.utils.read_metadata
-        file_connector.swift.common.utils.write_metadata = _mock_write_metadata
-        file_connector.swift.common.utils.read_metadata = _mock_read_metadata
+        #self._saved_df_wm = file_connector.swift.obj.diskfile.write_metadata
+        #self._saved_df_rm = file_connector.swift.obj.diskfile.read_metadata
+        #file_connector.swift.obj.diskfile.write_metadata = _mock_write_metadata
+        #file_connector.swift.obj.diskfile.read_metadata = _mock_read_metadata
+        #self._saved_ut_wm = file_connector.swift.common.utils.write_metadata
+        #self._saved_ut_rm = file_connector.swift.common.utils.read_metadata
+        #file_connector.swift.common.utils.write_metadata = _mock_write_metadata
+        #file_connector.swift.common.utils.read_metadata = _mock_read_metadata
         self._saved_do_fsync = file_connector.swift.obj.diskfile.do_fsync
         file_connector.swift.obj.diskfile.do_fsync = _mock_do_fsync
         self.td = tempfile.mkdtemp()
@@ -186,10 +189,10 @@ class TestDiskFile(unittest.TestCase):
         self.lg = None
         self.mgr = None
         _destroyxattr()
-        file_connector.swift.obj.diskfile.write_metadata = self._saved_df_wm
-        file_connector.swift.obj.diskfile.read_metadata = self._saved_df_rm
-        file_connector.swift.common.utils.write_metadata = self._saved_ut_wm
-        file_connector.swift.common.utils.read_metadata = self._saved_ut_rm
+        #file_connector.swift.obj.diskfile.write_metadata = self._saved_df_wm
+        #file_connector.swift.obj.diskfile.read_metadata = self._saved_df_rm
+        #file_connector.swift.common.utils.write_metadata = self._saved_ut_wm
+        #file_connector.swift.common.utils.read_metadata = self._saved_ut_rm
         file_connector.swift.obj.diskfile.do_fsync = self._saved_do_fsync
         shutil.rmtree(self.td)
 
@@ -1125,13 +1128,12 @@ class TestDiskFile(unittest.TestCase):
                       _m_do_open),
                 patch("file_connector.swift.obj.diskfile.do_fstat",
                       _m_do_fstat),
-                patch("file_connector.swift.obj.diskfile.read_metadata",
-                      _m_rmd),
                 patch("file_connector.swift.obj.diskfile.do_close",
                       _m_do_close),
                 patch("file_connector.swift.obj.diskfile.logging.warn",
                       _m_log)):
             gdf = _get_diskfile(self.mgr, "vol0", "p57", "ufo47", "bar", "z")
+            gdf._mp.read_metadata = _m_rmd
             try:
                 with gdf.open():
                     pass
@@ -1249,9 +1251,9 @@ class TestDiskFile(unittest.TestCase):
         self.assertTrue(gdf._disk_file_does_not_exist)
         _m_rmd = Mock()
         _m_do_unlink = Mock()
-        with patch("file_connector.swift.obj.diskfile.read_metadata", _m_rmd):
-            with patch("file_connector.swift.obj.diskfile.do_unlink",
-                       _m_do_unlink):
-                gdf.delete(0)
+        gdf._mp.read_metadata = _m_rmd
+        with patch("file_connector.swift.obj.diskfile.do_unlink",
+                   _m_do_unlink):
+            gdf.delete(0)
         self.assertFalse(_m_rmd.called)
         self.assertFalse(_m_do_unlink.called)

@@ -22,13 +22,16 @@ import unittest
 import shutil
 import tarfile
 import swift.common.manager
+import xattr
+
 import file_connector.swift.common.DiskDir
+
 from mock import Mock, patch
 from time import time
 from swift.common.utils import normalize_timestamp
 from file_connector.swift.common import utils
 from file_connector.swift.common.utils import serialize_metadata, \
-    deserialize_metadata
+    deserialize_metadata, XattrMetadataPersistence
 from test_utils import _initxattr, _destroyxattr, _setxattr, _getxattr
 from test.unit import FakeLogger, DATA_DIR
 
@@ -66,17 +69,6 @@ def timestamp_in_range(ts, base):
 class TestDiskDirModuleFunctions(unittest.TestCase):
     """ Tests for file_connector.swift.common.DiskDir module functions """
 
-    def test__read_metadata(self):
-        def fake_read_metadata(p):
-            return { 'a': 1, 'b': ('c', 5) }
-        orig_rm = dd.read_metadata
-        dd.read_metadata = fake_read_metadata
-        try:
-            md = dd._read_metadata("/tmp/foo")
-        finally:
-            dd.read_metadata = orig_rm
-        assert md['a'] == (1, 0)
-        assert md['b'] == ('c', 5)
 
     def test_filter_end_marker(self):
         in_objs, end_marker = [], ''
@@ -277,23 +269,21 @@ class TestDiskCommon(unittest.TestCase):
     """ Tests for file_connector.swift.common.DiskDir.DiskCommon """
 
     def setUp(self):
-        _initxattr()
         self.fake_logger = FakeLogger()
         self.td = tempfile.mkdtemp()
         self.fake_drives = []
         self.fake_accounts = []
-        for i in range(0,3):
+        for i in range(0, 3):
             self.fake_drives.append("drv%d" % i)
             os.makedirs(os.path.join(self.td, self.fake_drives[i]))
             self.fake_accounts.append(self.fake_drives[i])
 
     def tearDown(self):
-        _destroyxattr()
         shutil.rmtree(self.td)
 
     def test_constructor(self):
         dc = dd.DiskCommon(self.td, self.fake_drives[0],
-                            self.fake_accounts[0], self.fake_logger)
+                           self.fake_accounts[0], self.fake_logger)
         assert dc.metadata == {}
         assert dc.db_file == dd._db_file
         assert dc.pending_timeout == 10
@@ -303,16 +293,35 @@ class TestDiskCommon(unittest.TestCase):
         assert dc.account == self.fake_accounts[0]
         assert dc.datadir == os.path.join(self.td, self.fake_drives[0])
         assert dc._dir_exists is False
+        self.assertEqual(dc._mp.dev_path,
+                         os.path.join(self.td, self.fake_drives[0]))
+
+    def test__read_metadata(self):
+        def fake_read_metadata(p):
+            return {'a': 1, 'b': ('c', 5)}
+        dc = dd.DiskCommon(self.td, self.fake_drives[0],
+                           self.fake_accounts[0], self.fake_logger)
+        orig_rm = dc._mp.read_metadata
+        dc._mp.read_metadata = fake_read_metadata
+        try:
+            md = dc._read_metadata("/tmp/foo")
+        finally:
+            dc._mp.read_metadata = orig_rm
+        assert md['a'] == (1, 0)
+        assert md['b'] == ('c', 5)
 
     def test__dir_exists_read_metadata_exists(self):
         datadir = os.path.join(self.td, self.fake_drives[0])
         fake_md = {"fake": (True, 0)}
         fake_md_p = serialize_metadata(fake_md)
-        _setxattr(datadir, utils.METADATA_KEY, fake_md_p)
+        xattr.setxattr(datadir, utils.METADATA_KEY, fake_md_p)
+
         dc = dd.DiskCommon(self.td, self.fake_drives[0],
-                           self.fake_accounts[0], self.fake_logger)
+                           self.fake_accounts[0], self.fake_logger,
+                           mp_mode='xattr')
         dc._dir_exists_read_metadata()
-        #assert dc.metadata == fake_md, repr(dc.metadata)
+
+        assert dc.metadata == fake_md, repr(dc.metadata)
         assert dc.db_file == dd._db_file
         assert dc.pending_timeout == 10
         assert dc.stale_reads_ok is False
@@ -337,34 +346,36 @@ class TestDiskCommon(unittest.TestCase):
 
     def test_is_deleted(self):
         dc = dd.DiskCommon(self.td, self.fake_drives[0],
-                            self.fake_accounts[0], self.fake_logger)
+                           self.fake_accounts[0], self.fake_logger)
         dc._dir_exists_read_metadata()
-        assert dc.is_deleted() == False
+        self.assertFalse(dc.is_deleted())
 
     def test_update_metadata(self):
         dc = dd.DiskCommon(self.td, self.fake_drives[0],
-                           self.fake_accounts[0], self.fake_logger)
-        utils.create_container_metadata(dc.datadir)
-        dc.metadata = dd._read_metadata(dc.datadir)
+                           self.fake_accounts[0], self.fake_logger,
+                           mp_mode='xattr')
+        dc._mp.create_container_metadata(dc.datadir)
+        dc.metadata = dc._read_metadata(dc.datadir)
         md_copy = dc.metadata.copy()
 
         def _mock_write_metadata(path, md):
             self.fail("write_metadata should not have been called")
 
-        orig_wm = dd.write_metadata
-        dd.write_metadata = _mock_write_metadata
+        orig_wm = dc._mp.write_metadata
+        dc._mp.write_metadata = _mock_write_metadata
         try:
             dc.update_metadata({})
             assert dc.metadata == md_copy
             dc.update_metadata(md_copy)
             assert dc.metadata == md_copy
         finally:
-            dd.write_metadata = orig_wm
+            dc._mp.write_metadata = orig_wm
 
         dc.update_metadata({'X-Container-Meta-foo': '42'})
         assert 'X-Container-Meta-foo' in dc.metadata
         assert dc.metadata['X-Container-Meta-foo'] == '42'
-        md = deserialize_metadata(_getxattr(dc.datadir, utils.METADATA_KEY))
+        md = deserialize_metadata(xattr.getxattr(dc.datadir,
+                                                 utils.METADATA_KEY))
         assert dc.metadata == md, "%r != %r" % (dc.metadata, md)
         del dc.metadata['X-Container-Meta-foo']
         assert dc.metadata == md_copy
@@ -412,7 +423,8 @@ class TestContainerBroker(unittest.TestCase):
         assert container is not None
         self.container = os.path.join(self.path, self.drive, container)
         return dd.DiskDir(self.path, self.drive, account=account,
-                          container=container, logger=FakeLogger())
+                          container=container, logger=FakeLogger(),
+                          mp_mode='xattr')
 
     def _create_file(self, p):
         fullname = os.path.join(self.container, p)
@@ -484,7 +496,8 @@ class TestContainerBroker(unittest.TestCase):
         # Test swift.common.db.ContainerBroker.__init__
         container = os.path.join(self.path, self.drive, 'c')
         os.makedirs(container)
-        utils.write_metadata(container, dict(a=1, b=2))
+        mp = XattrMetadataPersistence(os.path.join(self.path, self.drive))
+        mp.write_metadata(container, dict(a=1, b=2))
         broker = self._get_broker(account='a', container='c')
         self.assertEqual(broker.db_file, dd._db_file)
         self.assertEqual(os.path.basename(broker.db_file), 'db_file.db')
@@ -891,7 +904,9 @@ class TestContainerBroker(unittest.TestCase):
         # Confirm that metadata of objects (xattrs) are not fetched when
         # out_content_type is text/plain
         _m_r_md = Mock(return_value={})
-        with patch('file_connector.swift.common.utils.read_metadata', _m_r_md):
+        with patch(
+            'file_connector.swift.common.utils.XattrMetadataPersistence.'
+                'read_metadata', _m_r_md):
             listing = broker.list_objects_iter(500, '', None, None, '',
                                                out_content_type="text/plain")
             self.assertEquals(len(listing), 100)
@@ -901,11 +916,15 @@ class TestContainerBroker(unittest.TestCase):
         # Confirm that metadata of objects (xattrs) are still fetched when
         # out_content_type is NOT text/plain
         _m_r_md.reset_mock()
-        with patch('file_connector.swift.common.utils.read_metadata', _m_r_md):
+        with patch(
+            'file_connector.swift.common.utils.XattrMetadataPersistence.'
+                'read_metadata', _m_r_md):
             listing = broker.list_objects_iter(500, '', None, None, '')
             self.assertEquals(len(listing), 100)
-        # 10 getxattr() calls for 10 directories and 100 more for 100 objects
-        self.assertEqual(_m_r_md.call_count, 110)
+        # 10 getxattr() calls for 10 directories and 200 more for 100 objects
+        # 100 for read_metadata call from list_objects_iter and another 100
+        # from restore_metadata
+        self.assertEqual(_m_r_md.call_count, 210)
 
     def test_double_check_trailing_delimiter(self):
         # Test swift.common.db.ContainerBroker.list_objects_iter for a
@@ -1120,7 +1139,8 @@ class TestAccountBroker(unittest.TestCase):
 
     def test_creation_bad_metadata(self):
         # Test swift.common.db.AccountBroker.__init__
-        utils.write_metadata(self.drive_fullpath, dict(a=1, b=2))
+        mp = XattrMetadataPersistence(self.drive_fullpath)
+        mp.write_metadata(self.drive_fullpath, dict(a=1, b=2))
         broker = self._get_broker(account='a')
         self.assertEqual(broker.db_file, dd._db_file)
         self.assertEqual(os.path.basename(broker.db_file), 'db_file.db')
@@ -1317,8 +1337,9 @@ class TestAccountBroker(unittest.TestCase):
         # Confirm that metadata of containers (xattrs) are not fetched when
         # response_content_type is text/plain
         _m_r_md = Mock(return_value={})
-        with patch('file_connector.swift.common.DiskDir._read_metadata',
-                   _m_r_md):
+        with patch(
+            'file_connector.swift.common.DiskDir.DiskCommon._read_metadata',
+                _m_r_md):
             listing = broker.list_containers_iter(100, '', None, None,
                                                   '', 'text/plain')
             self.assertEquals(len(listing), 10)
@@ -1327,8 +1348,9 @@ class TestAccountBroker(unittest.TestCase):
         # Confirm that metadata of containers (xattrs) are still fetched when
         # response_content_type is NOT text/plain
         _m_r_md.reset_mock()
-        with patch('file_connector.swift.common.DiskDir._read_metadata',
-                   _m_r_md):
+        with patch(
+            'file_connector.swift.common.DiskDir.DiskCommon._read_metadata',
+                _m_r_md):
             listing = broker.list_containers_iter(100, '', None, None,
                                                   '', 'application/json')
             self.assertEquals(len(listing), 10)
@@ -1410,7 +1432,8 @@ class TestDiskAccount(unittest.TestCase):
                 _setxattr(datadir, utils.METADATA_KEY, fake_md_p)
             if i == 2:
                 # Third drive has valid account metadata
-                utils.create_account_metadata(datadir)
+                mp = XattrMetadataPersistence(datadir)
+                mp.create_account_metadata(datadir)
 
     def tearDown(self):
         _destroyxattr()

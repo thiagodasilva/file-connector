@@ -42,9 +42,8 @@ from file_connector.swift.common.exceptions import \
 from file_connector.swift.common.fs_utils import do_fstat, do_open, do_close, \
     do_unlink, do_chown, do_fsync, do_fchown, do_stat, do_write, do_read, \
     do_fadvise64, do_rename, do_fdatasync, do_lseek, do_mkdir
-from file_connector.swift.common.utils import read_metadata, write_metadata, \
-    validate_object, create_object_metadata, rmobjdir, dir_is_object, \
-    get_object_metadata, XattrMetadataPersistence
+from file_connector.swift.common.utils import validate_object, \
+    rmobjdir, dir_is_object, get_metadata_persistence
 from file_connector.swift.common.utils import X_CONTENT_TYPE, \
     X_TIMESTAMP, X_TYPE, X_OBJECT_TYPE, FILE, OBJECT, DIR_TYPE, \
     FILE_TYPE, DEFAULT_UID, DEFAULT_GID, DIR_NON_OBJECT, DIR_OBJECT, \
@@ -63,7 +62,8 @@ def _random_sleep():
     sleep(random.uniform(0.5, 0.15))
 
 
-def make_directory(full_path, uid, gid, metadata=None, persist_metadata=True):
+def make_directory(full_path, uid, gid, mp, metadata=None,
+                   persist_metadata=True):
     """
     Make a directory and change the owner ship as specified, and potentially
     creating the object metadata if requested.
@@ -159,9 +159,9 @@ def make_directory(full_path, uid, gid, metadata=None, persist_metadata=True):
     else:
         if metadata and persist_metadata:
             # We were asked to set the initial metadata for this object.
-            metadata_orig = get_object_metadata(full_path)
+            metadata_orig = mp.get_object_metadata(full_path)
             metadata_orig.update(metadata)
-            write_metadata(full_path, metadata_orig)
+            mp.write_metadata(full_path, metadata_orig)
             metadata = metadata_orig
 
         # We created it, so we are reponsible for always setting the proper
@@ -322,7 +322,8 @@ class DiskFileWriter(object):
         stack = []
         while True:
             md = None if cur_path != full_path else metadata
-            ret, newmd = make_directory(cur_path, df._uid, df._gid, md,
+            ret, newmd = make_directory(cur_path, df._uid, df._gid,
+                                        self._disk_file._mp, md,
                                         self._persist_metadata)
             if ret:
                 break
@@ -341,7 +342,8 @@ class DiskFileWriter(object):
         while child:
             cur_path = os.path.join(cur_path, child)
             md = None if cur_path != full_path else metadata
-            ret, newmd = make_directory(cur_path, df._uid, df._gid, md,
+            ret, newmd = make_directory(cur_path, df._uid, df._gid,
+                                        self._disk_file._mp, md,
                                         self._persist_metadata)
             if not ret:
                 raise DiskFileError("DiskFileWriter._create_dir_object():"
@@ -487,7 +489,7 @@ class DiskFileWriter(object):
         # disk.
         if self._persist_metadata:
             data_file = os.path.join(self._put_datadir, self._obj)
-            write_metadata(data_file, metadata, self._fd)
+            self._disk_file._mp.write_metadata(data_file, metadata, self._fd)
 
         # We call fsync() before calling drop_cache() to lower the
         # amount of redundant work the drop cache code will perform on
@@ -787,7 +789,7 @@ class DiskFile(object):
 
         self._data_file = os.path.join(self._put_datadir, self._obj)
         self._disk_file_open = False
-        self._mp = XattrMetadataPersistence(dev_path)
+        self._mp = get_metadata_persistence(dev_path)
 
     @property
     def timestamp(self):
@@ -836,8 +838,7 @@ class DiskFile(object):
         Open the object.
 
         This implementation opens the data file representing the object, reads
-        the associated metadata in the extended attributes, additionally
-        combining metadata from fast-POST `.meta` files.
+        the associated metadata.
 
         .. note::
 
@@ -864,10 +865,11 @@ class DiskFile(object):
             obj_size = self._stat.st_size
 
             if not self._metadata:
-                self._metadata = read_metadata(self._data_file, self._fd)
+                self._metadata = self._mp.read_metadata(
+                    self._data_file, self._fd)
             if not validate_object(self._metadata, self._stat):
-                self._metadata = create_object_metadata(self._fd, self._stat,
-                                                        self._metadata)
+                self._metadata = self._mp.create_object_metadata(
+                    self._data_file, self._fd, self._stat, self._metadata)
             assert self._metadata is not None
             self._filter_metadata()
 
@@ -998,7 +1000,7 @@ class DiskFile(object):
                             errors as the `open()` method.
         """
         try:
-            self._metadata = read_metadata(self._data_file)
+            self._metadata = self._mp.read_metadata(self._data_file)
         except (OSError, IOError) as err:
             if err.errno in (errno.ENOENT, errno.ESTALE):
                 self._disk_file_does_not_exist = True
@@ -1103,7 +1105,7 @@ class DiskFile(object):
         metadata = self._keep_sys_metadata(metadata)
         data_file = os.path.join(self._put_datadir, self._obj)
         self._threadpool.run_in_thread(
-            write_metadata, data_file, metadata)
+            self._mp.write_metadata, data_file, metadata)
 
     def _keep_sys_metadata(self, metadata):
         """
@@ -1116,7 +1118,8 @@ class DiskFile(object):
         # If metadata has been previously fetched, use that.
         # Stale metadata (outdated size/etag) would've been updated when
         # metadata is fetched for the first time.
-        orig_metadata = self._metadata or read_metadata(self._data_file)
+        orig_metadata = self._metadata or \
+            self._mp.read_metadata(self._data_file)
 
         sys_keys = [X_CONTENT_TYPE, X_ETAG, 'name', X_CONTENT_LENGTH,
                     X_OBJECT_TYPE, X_TYPE]
@@ -1147,11 +1150,12 @@ class DiskFile(object):
             # container or parent directory is deleted.
             #
             # FIXME: Ideally we should use an atomic metadata update operation
-            metadata = self._metadata or read_metadata(self._data_file)
+            metadata = self._metadata or \
+                self._mp.read_metadata(self._data_file)
             if dir_is_object(metadata):
                 metadata[X_OBJECT_TYPE] = DIR_NON_OBJECT
-                write_metadata(self._data_file, metadata)
-            rmobjdir(self._data_file)
+                self._mp.write_metadata(self._data_file, metadata)
+            rmobjdir(self._mp, self._data_file)
         else:
             # Delete file object
             do_unlink(self._data_file)
@@ -1162,7 +1166,7 @@ class DiskFile(object):
         dirname = os.path.dirname(self._data_file)
         while dirname and dirname != self._container_path:
             # Try to remove any directories that are not objects.
-            if not rmobjdir(dirname):
+            if not rmobjdir(self._mp, dirname):
                 # If a directory with objects has been found, we can stop
                 # garabe collection
                 break
@@ -1193,7 +1197,8 @@ class DiskFile(object):
             return
 
         try:
-            metadata = self._metadata or read_metadata(self._data_file)
+            metadata = self._metadata or \
+                self._mp.read_metadata(self._data_file)
         except (IOError, OSError) as err:
             if err.errno in (errno.ESTALE, errno.ENOENT):
                 return
