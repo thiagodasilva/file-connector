@@ -31,7 +31,7 @@ from Queue import Queue, Empty
 from uuid import uuid4
 
 from file_connector.swift.common.exceptions import FileConnectorFileSystemIOError, \
-    ThreadPoolDead, FileConnectorFileSystemOSError
+    ThreadPoolDead, FileConnectorFileSystemOSError, FileConnectorException
 from swift.common.exceptions import DiskFileNoSpace
 from swift.common.db import native_str_keys
 from file_connector.swift.common.fs_utils import do_getctime, do_getmtime, do_stat, \
@@ -740,7 +740,6 @@ def rmobjdir(mp, dir_path, marker_dir_check=True):
 class MetadataPersistence(object):
     def __init__(self, dev_path):
         self.dev_path = dev_path
-        self.metadata_version = 1
 
     def read_metadata(self, path, fd=None):
         metastr = self._read_metadata(path, fd)
@@ -766,7 +765,6 @@ class MetadataPersistence(object):
         md = metadata.copy()
         if md.get(X_ETAG) and md[X_ETAG].endswith('-fetag'):
             del md[X_ETAG]
-        md['metadata_version'] = self.metadata_version
 
         self._write_metadata(path, md, fd)
 
@@ -891,16 +889,13 @@ class JsonMetadataPersistence(MetadataPersistence):
     def _read_metadata(self, path, fd=None):
         meta_dir_path, meta_file_path = self._get_metadata_dir(path)
 
-        # TODO is this test needed?
-        if not os.path.exists(meta_file_path):
-            return ''
-
+        metastr = ''
         try:
             with open(meta_file_path, 'rt') as f:
                 metastr = f.read()
-        except Exception as err:
-            # TODO check on except
-            metastr = ''
+        except IOError as ioerr:
+            if ioerr.errno != errno.ENOENT:
+                raise
 
         return metastr
 
@@ -920,7 +915,6 @@ class JsonMetadataPersistence(MetadataPersistence):
 
         tmpfile = meta_file_path + '_' + uuid4().hex
         try:
-            # TODO check on open 'wt'
             with open(tmpfile, 'wt') as f:
                 f.write(metastr)
         except IOError as err:

@@ -33,6 +33,7 @@ from file_connector.swift.common.utils import deserialize_metadata, \
     JsonMetadataPersistence
 from file_connector.swift.common.exceptions import FileConnectorFileSystemOSError,\
     FileConnectorFileSystemIOError
+from file_connector.swift.common.fs_utils import mkdirs
 from swift.common.exceptions import DiskFileNoSpace
 from test.unit import DATA_DIR
 
@@ -177,15 +178,16 @@ class TestSafeUnpickler(unittest.TestCase):
 
 class TestJsonMetadataPersistence(unittest.TestCase):
     def setUp(self):
-        self.mp = JsonMetadataPersistence('/srv/fc')
+        self.td = tempfile.mkdtemp()
+        self.mp = JsonMetadataPersistence(self.td)
 
     def tearDown(self):
-        pass
+        shutil.rmtree(self.td)
 
     def test_get_metadata_dir_obj(self):
-        path = "/srv/fc/cont/obj"
-        expected_dir = os.path.join('/srv/fc/cont', self.mp.meta_dir, 'obj')
-        expected_file = os.path.join('/srv/fc/cont', self.mp.meta_dir, 'obj',
+        path = os.path.join(self.td, 'cont/obj')
+        expected_dir = os.path.join(self.td, 'cont', self.mp.meta_dir, 'obj')
+        expected_file = os.path.join(self.td, 'cont', self.mp.meta_dir, 'obj',
                                      self.mp.obj_meta)
         dir_path, file_path = self.mp._get_metadata_dir(path)
 
@@ -193,10 +195,10 @@ class TestJsonMetadataPersistence(unittest.TestCase):
         self.assertEqual(expected_file, file_path)
 
         # subdirs sanity
-        path = "/srv/fc/cont/subdir1/subdir2/obj"
-        expected_dir = os.path.join('/srv/fc/cont/subdir1/subdir2',
+        path = os.path.join(self.td, 'cont/subdir1/subdir2/obj')
+        expected_dir = os.path.join(self.td, 'cont/subdir1/subdir2',
                                     self.mp.meta_dir, 'obj')
-        expected_file = os.path.join('/srv/fc/cont/subdir1/subdir2',
+        expected_file = os.path.join(self.td, 'cont/subdir1/subdir2',
                                      self.mp.meta_dir, 'obj',
                                      self.mp.obj_meta)
         dir_path, file_path = self.mp._get_metadata_dir(path)
@@ -205,9 +207,9 @@ class TestJsonMetadataPersistence(unittest.TestCase):
         self.assertEqual(expected_file, file_path)
 
     def test_get_metadata_dir_cont(self):
-        path = "/srv/fc/cont"
-        expected_dir = os.path.join('/srv/fc/cont', self.mp.meta_dir)
-        expected_file = os.path.join('/srv/fc/cont', self.mp.meta_dir,
+        path = os.path.join(self.td, 'cont')
+        expected_dir = os.path.join(self.td, 'cont', self.mp.meta_dir)
+        expected_file = os.path.join(self.td, 'cont', self.mp.meta_dir,
                                      self.mp.cont_meta)
         dir_path, file_path = self.mp._get_metadata_dir(path)
 
@@ -215,8 +217,8 @@ class TestJsonMetadataPersistence(unittest.TestCase):
         self.assertEqual(expected_file, file_path)
 
     def test_write_metadata(self):
-        path = "/tmp/foo/cont/obj"
-        md_file = os.path.join('/tmp/foo/cont', self.mp.meta_dir,
+        path = os.path.join(self.td, 'cont/obj')
+        md_file = os.path.join(self.td, 'cont', self.mp.meta_dir,
                                'obj', self.mp.obj_meta)
         orig_d = {'bar': 'foo'}
         self.mp.write_metadata(path, orig_d)
@@ -226,8 +228,7 @@ class TestJsonMetadataPersistence(unittest.TestCase):
         except Exception as e:
             self.fail(e)
 
-        expected_md = {'bar': 'foo',
-                       'metadata_version': self.mp.metadata_version}
+        expected_md = {'bar': 'foo'}
         self.assertEqual(expected_md, md)
 
     def test_write_metadata_etag(self):
@@ -244,8 +245,7 @@ class TestJsonMetadataPersistence(unittest.TestCase):
             self.fail(e)
 
         # but store a real etag
-        expected_md = {'bar': 'foo',
-                       'metadata_version': self.mp.metadata_version}
+        expected_md = {'bar': 'foo'}
         self.assertEqual(expected_md, md)
 
         orig_d = {'bar': 'foo', 'ETag': 'realetag'}
@@ -256,8 +256,7 @@ class TestJsonMetadataPersistence(unittest.TestCase):
         except Exception as e:
             self.fail(e)
 
-        expected_md = {'bar': 'foo', 'ETag': 'realetag',
-                       'metadata_version': self.mp.metadata_version}
+        expected_md = {'bar': 'foo', 'ETag': 'realetag'}
         self.assertEqual(expected_md, md)
 
     def test_write_metadata_write_fail_nospace(self):
@@ -272,9 +271,9 @@ class TestJsonMetadataPersistence(unittest.TestCase):
                 DiskFileNoSpace,
                 self.mp.write_metadata, path, orig_d)
 
-    def test_write_metadata_write_fail(self):
+    def test_write_metadata_fail(self):
         write_mock = Mock(side_effect=IOError(errno.EIO, "fail"))
-        path = "/tmp/foo/cont/obj"
+        path = os.path.join(self.td, 'cont/obj')
         orig_d = {'bar': 'foo'}
         mo = mock_open()
         with patch('__builtin__.open', mo):
@@ -286,12 +285,54 @@ class TestJsonMetadataPersistence(unittest.TestCase):
 
     def test_write_metadata_rename_fail(self):
         rename_mock = Mock(side_effect=OSError('failed rename'))
-        path = "/tmp/foo/cont/obj"
+        path = os.path.join(self.td, 'cont/obj')
         orig_d = {'bar': 'foo'}
         with patch('os.rename', rename_mock):
             self.assertRaises(
                 FileConnectorFileSystemOSError,
                 self.mp.write_metadata, path, orig_d)
+
+    def test_read_obj_metadata(self):
+        path = os.path.join(self.td, 'cont/obj')
+        md_dir = os.path.join(self.td, 'cont', self.mp.meta_dir, 'obj')
+        md_file = os.path.join(self.td, 'cont', self.mp.meta_dir,
+                               'obj', self.mp.obj_meta)
+        orig_d = {'bar': 'foo'}
+        mkdirs(md_dir)
+        with open(md_file, 'wt') as f:
+            f.write(serialize_metadata(orig_d))
+
+        md = self.mp.read_metadata(path)
+        self.assertEqual(orig_d, md)
+
+    def test_read_cont_metadata(self):
+        path = os.path.join(self.td, 'cont')
+        md_dir = os.path.join(self.td, 'cont', self.mp.meta_dir)
+        md_file = os.path.join(self.td, 'cont', self.mp.meta_dir,
+                               self.mp.cont_meta)
+        orig_d = {'bar': 'foo'}
+        mkdirs(md_dir)
+        with open(md_file, 'wt') as f:
+            f.write(serialize_metadata(orig_d))
+
+        md = self.mp.read_metadata(path)
+        self.assertEqual(orig_d, md)
+
+    def test_read_metadata_nofile(self):
+        path = os.path.join(self.td, 'cont/obj')
+        md = self.mp.read_metadata(path)
+        self.assertEqual({}, md)
+
+    def test_read_metadata_fail(self):
+        read_mock = Mock(side_effect=IOError(errno.EIO, "fail"))
+        path = os.path.join(self.td, 'cont/obj')
+        mo = mock_open()
+        with patch('__builtin__.open', mo):
+            mock_file = mo.return_value
+            mock_file.read = read_mock
+            self.assertRaises(
+                IOError,
+                self.mp.read_metadata, path)
 
 
 class TestUtils(unittest.TestCase):
@@ -311,7 +352,6 @@ class TestUtils(unittest.TestCase):
         xkey = _xkey(path, utils.METADATA_KEY)
         self.assertEqual(1, len(_xattrs))
         self.assertIn(xkey, _xattrs)
-        orig_d['metadata_version'] = self.mp.metadata_version
         self.assertEqual(orig_d, deserialize_metadata(_xattrs[xkey]))
         self.assertEqual(_xattr_op_cnt['set'], 1)
 
@@ -364,7 +404,6 @@ class TestUtils(unittest.TestCase):
             assert xkey in _xattrs
             assert len(_xattrs[xkey]) <= utils.MAX_XATTR_SIZE
             payload += _xattrs[xkey]
-        orig_d['metadata_version'] = self.mp.metadata_version
         assert orig_d == deserialize_metadata(payload)
         assert _xattr_op_cnt['set'] == 3, "%r" % _xattr_op_cnt
 
@@ -647,7 +686,6 @@ class TestUtils(unittest.TestCase):
         tf.file.write('4567')
         tf.file.flush()
         r_md = self.mp.create_object_metadata(tf.name)
-        r_md['metadata_version'] = self.mp.metadata_version
 
         xkey = _xkey(tf.name, utils.METADATA_KEY)
         assert len(_xattrs.keys()) == 1
@@ -670,7 +708,6 @@ class TestUtils(unittest.TestCase):
         td = tempfile.mkdtemp()
         try:
             r_md = self.mp.create_object_metadata(td)
-            r_md['metadata_version'] = self.mp.metadata_version
 
             xkey = _xkey(td, utils.METADATA_KEY)
             assert len(_xattrs.keys()) == 1
@@ -748,7 +785,6 @@ class TestUtils(unittest.TestCase):
         td = tempfile.mkdtemp()
         try:
             r_md = self.mp.create_container_metadata(td)
-            r_md['metadata_version'] = self.mp.metadata_version
 
             xkey = _xkey(td, utils.METADATA_KEY)
             assert len(_xattrs.keys()) == 1
@@ -777,7 +813,6 @@ class TestUtils(unittest.TestCase):
         td = tempfile.mkdtemp()
         try:
             r_md = self.mp.create_account_metadata(td)
-            r_md['metadata_version'] = self.mp.metadata_version
 
             xkey = _xkey(td, utils.METADATA_KEY)
             assert len(_xattrs.keys()) == 1
