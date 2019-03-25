@@ -13,30 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import cPickle as pickle
 import os
 import sys
 import stat
 import json
 import errno
-import random
 import logging
-from hashlib import md5
-from eventlet import sleep, Timeout, tpool, greenthread, \
-    greenio, event
-from Queue import Queue, Empty
+import pickletools
 import threading as stdlib_threading
 
-import cPickle as pickle
 from cStringIO import StringIO
-import pickletools
+from eventlet import sleep, Timeout, tpool, greenthread, \
+    greenio, event
+from hashlib import md5
+from Queue import Queue, Empty
+from uuid import uuid4
+
 from file_connector.swift.common.exceptions import FileConnectorFileSystemIOError, \
-    ThreadPoolDead
+    ThreadPoolDead, FileConnectorFileSystemOSError, FileConnectorException
 from swift.common.exceptions import DiskFileNoSpace
 from swift.common.db import native_str_keys
 from file_connector.swift.common.fs_utils import do_getctime, do_getmtime, do_stat, \
     do_rmdir, do_log_rl, get_filename_from_fd, do_open, do_getsize, \
     do_getxattr, do_setxattr, do_removexattr, do_read, do_close, do_dup, \
-    do_lseek, do_fstat, do_fsync, do_rename
+    do_lseek, do_fstat, mkdirs, do_rename
 
 try:
     import scandir
@@ -73,10 +74,11 @@ DEFAULT_GID = -1
 PICKLE_PROTOCOL = 2
 CHUNK_SIZE = 65536
 
-# TODO: look into removing this, old config options
+# TODO: look into removing this or read from fs.conf file again
 _read_pickled_metadata = True
 _implicit_dir_objects = False
 _do_getsize = False
+_mp_mode = 'json'
 
 
 class ThreadPool(object):
@@ -366,106 +368,6 @@ def deserialize_metadata(metastr):
         return {}
 
 
-def read_metadata(path, fd=None):
-    """
-    Helper function to read the serialized metadata from a File/Directory.
-
-    :param path_or_fd: File/Directory path or fd from which to read metadata.
-
-    :returns: dictionary of metadata
-    """
-    if fd:
-        path = fd
-    return read_metadata_from_xattr(path)
-
-
-def read_metadata_from_xattr(path_or_fd):
-    metastr = ''
-    key = 0
-    try:
-        while True:
-            metastr += do_getxattr(path_or_fd, '%s%s' %
-                                   (METADATA_KEY, (key or '')))
-            key += 1
-            if len(metastr) < MAX_XATTR_SIZE:
-                # Prevent further getxattr calls
-                break
-    except IOError as err:
-        if err.errno != errno.ENODATA:
-            raise
-
-    if not metastr:
-        return {}
-
-    metadata = deserialize_metadata(metastr)
-    if not metadata:
-        # Empty dict i.e deserializing of metadata has failed, probably
-        # because it is invalid or incomplete or corrupt
-        clean_metadata(path_or_fd)
-
-    assert isinstance(metadata, dict)
-    return metadata
-
-
-def write_metadata(path, metadata, fd=None):
-    """
-    Helper function to write serialized metadata for a File/Directory.
-
-    :param path: File/Directory path to write the metadata
-    :param metadata: dictionary of metadata write
-    :param fd: file descriptor to write the metadata, when fd is passed in
-               it will be used instead of path
-    """
-    if fd:
-        path = fd
-
-    md = metadata.copy()
-    if md.get(X_ETAG) and md[X_ETAG].endswith('-fetag'):
-        del md[X_ETAG]
-
-    write_metadata_to_xattr(path, md)
-
-
-def write_metadata_to_xattr(path_or_fd, metadata):
-    assert isinstance(metadata, dict)
-    metastr = serialize_metadata(metadata)
-    key = 0
-    while metastr:
-        try:
-            do_setxattr(path_or_fd,
-                        '%s%s' % (METADATA_KEY, key or ''),
-                        metastr[:MAX_XATTR_SIZE])
-        except IOError as err:
-            if err.errno in (errno.ENOSPC, errno.EDQUOT):
-                if isinstance(path_or_fd, int):
-                    filename = get_filename_from_fd(path_or_fd)
-                    do_log_rl("write_metadata(%d, metadata) failed: %s : %s",
-                              path_or_fd, err, filename)
-                else:
-                    do_log_rl("write_metadata(%s, metadata) failed: %s",
-                              path_or_fd, err)
-                raise DiskFileNoSpace()
-            else:
-                raise FileConnectorFileSystemIOError(
-                    err.errno,
-                    'setxattr("%s", %s, metastr)' % (path_or_fd, key))
-        metastr = metastr[MAX_XATTR_SIZE:]
-        key += 1
-
-
-def clean_metadata(path_or_fd):
-    key = 0
-    while True:
-        try:
-            do_removexattr(path_or_fd, '%s%s' % (METADATA_KEY, (key or '')))
-        except IOError as err:
-            if err.errno == errno.ENODATA:
-                break
-            raise FileConnectorFileSystemIOError(
-                err.errno, 'removexattr("%s", %s)' % (path_or_fd, key))
-        key += 1
-
-
 def validate_container(metadata):
     if not metadata:
         logging.warn('validate_container: No metadata')
@@ -538,7 +440,7 @@ def validate_object(metadata, statinfo=None):
     return False
 
 
-def _update_list(path, cont_path, src_list, reg_file=True, object_count=0,
+def _update_list(mp, path, cont_path, src_list, reg_file=True, object_count=0,
                  bytes_used=0, obj_list=[]):
     if isinstance(path, unicode):
         path = path.encode('utf-8')
@@ -552,7 +454,8 @@ def _update_list(path, cont_path, src_list, reg_file=True, object_count=0,
             # directory
             try:
                 metadata = \
-                    read_metadata(os.path.join(cont_path, obj_path, obj_name))
+                    mp.read_metadata(
+                        os.path.join(cont_path, obj_path, obj_name))
             except FileConnectorFileSystemIOError as err:
                 if err.errno in (errno.ENOENT, errno.ESTALE):
                     # object might have been deleted by another process
@@ -577,20 +480,20 @@ def _update_list(path, cont_path, src_list, reg_file=True, object_count=0,
     return object_count, bytes_used
 
 
-def update_list(path, cont_path, dirs=[], files=[], object_count=0,
+def update_list(mp, path, cont_path, dirs=[], files=[], object_count=0,
                 bytes_used=0, obj_list=[]):
     if files:
-        object_count, bytes_used = _update_list(path, cont_path, files, True,
-                                                object_count, bytes_used,
+        object_count, bytes_used = _update_list(mp, path, cont_path, files,
+                                                True, object_count, bytes_used,
                                                 obj_list)
     if dirs:
-        object_count, bytes_used = _update_list(path, cont_path, dirs, False,
-                                                object_count, bytes_used,
-                                                obj_list)
+        object_count, bytes_used = _update_list(mp, path, cont_path, dirs,
+                                                False, object_count,
+                                                bytes_used, obj_list)
     return object_count, bytes_used
 
 
-def get_container_details(cont_path):
+def get_container_details(cont_path, mp):
     """
     get container details by traversing the filesystem
     """
@@ -599,7 +502,7 @@ def get_container_details(cont_path):
     obj_list = []
 
     for (path, dirs, files) in gf_walk(cont_path):
-        object_count, bytes_used = update_list(path, cont_path, dirs,
+        object_count, bytes_used = update_list(mp, path, cont_path, dirs,
                                                files, object_count,
                                                bytes_used, obj_list)
 
@@ -728,38 +631,6 @@ def _get_etag(path_or_fd):
     return etag
 
 
-def get_object_metadata(obj_path_or_fd, stats=None, calculate_etag=True):
-    """
-    Return metadata of object.
-    """
-    if not stats:
-        if isinstance(obj_path_or_fd, int):
-            # We are given a file descriptor, so this is an invocation from the
-            # DiskFile.open() method.
-            stats = do_fstat(obj_path_or_fd)
-        else:
-            # We are given a path to the object when the
-            # DiskDir.list_objects_iter method invokes us.
-            stats = do_stat(obj_path_or_fd)
-
-    if not stats:
-        metadata = {}
-    else:
-        is_dir = stat.S_ISDIR(stats.st_mode)
-        if calculate_etag:
-            etag = md5().hexdigest() if is_dir else _get_etag(obj_path_or_fd)
-        else:
-            etag = '0000000000000000000000000000000-fetag'
-        metadata = {
-            X_TYPE: OBJECT,
-            X_TIMESTAMP: normalize_timestamp(stats.st_ctime),
-            X_CONTENT_TYPE: DIR_TYPE if is_dir else FILE_TYPE,
-            X_OBJECT_TYPE: DIR_NON_OBJECT if is_dir else FILE,
-            X_CONTENT_LENGTH: 0 if is_dir else stats.st_size,
-            X_ETAG: etag}
-    return metadata
-
-
 def _add_timestamp(metadata_i):
     # At this point we have a simple key/value dictionary, turn it into
     # key/(value,timestamp) pairs.
@@ -773,19 +644,6 @@ def _add_timestamp(metadata_i):
     return metadata
 
 
-def get_container_metadata(cont_path):
-    objects = []
-    object_count = 0
-    bytes_used = 0
-    objects, object_count, bytes_used = get_container_details(cont_path)
-    metadata = {X_TYPE: CONTAINER,
-                X_TIMESTAMP: normalize_timestamp(
-                    do_getctime(cont_path)),
-                X_PUT_TIMESTAMP: normalize_timestamp(
-                    do_getmtime(cont_path)),
-                X_OBJECTS_COUNT: object_count,
-                X_BYTES_USED: bytes_used}
-    return _add_timestamp(metadata)
 
 
 def get_account_metadata(acc_path):
@@ -802,56 +660,6 @@ def get_account_metadata(acc_path):
                 X_CONTAINER_COUNT: container_count}
     return _add_timestamp(metadata)
 
-
-def restore_metadata(path, metadata, meta_orig):
-    if not meta_orig:
-        # Container and account metadata
-        meta_orig = read_metadata(path)
-    if meta_orig:
-        meta_new = meta_orig.copy()
-        meta_new.update(metadata)
-    else:
-        meta_new = metadata
-    if meta_orig != meta_new:
-        write_metadata(path, meta_new)
-    return meta_new
-
-
-def create_object_metadata(obj_path_or_fd, stats=None, existing_meta={},
-                           calculate_etag=True):
-    # We must accept either a path or a file descriptor as an argument to this
-    # method, as the diskfile modules uses a file descriptior and the DiskDir
-    # module (for container operations) uses a path.
-    #return get_object_metadata(obj_path_or_fd, stats, calculate_etag)
-
-    # TODO: while we don't support writing metadata to non xattr FS
-    # don't restore_metadata
-    metadata_from_stat = get_object_metadata(obj_path_or_fd, stats,
-                                             calculate_etag)
-
-    return restore_metadata(obj_path_or_fd,
-                            metadata_from_stat, existing_meta)
-
-
-def create_container_metadata(cont_path):
-    #return get_container_metadata(cont_path)
-
-    # TODO: while we don't support writing metadata to non xattr FS
-    # don't restore_metadata
-    metadata = get_container_metadata(cont_path)
-    rmd = restore_metadata(cont_path, metadata, {})
-    return rmd
-
-
-def create_account_metadata(acc_path):
-    #return get_account_metadata(acc_path)
-    # TODO: while we don't support writing metadata to non xattr FS
-    # don't restore_metadata
-    metadata = get_account_metadata(acc_path)
-    rmd = restore_metadata(acc_path, metadata, {})
-    return rmd
-
-
 # The following dir_xxx calls should definitely be replaced
 # with a Metadata class to encapsulate their implementation.
 # :FIXME: For now we have them as functions, but we should
@@ -864,7 +672,7 @@ def dir_is_object(metadata):
     return metadata.get(X_OBJECT_TYPE, "") == DIR_OBJECT
 
 
-def rmobjdir(dir_path, marker_dir_check=True):
+def rmobjdir(mp, dir_path, marker_dir_check=True):
     """
     Removes the directory as long as there are no objects stored in it. This
     works for containers also.
@@ -890,7 +698,7 @@ def rmobjdir(dir_path, marker_dir_check=True):
 
             if marker_dir_check:
                 try:
-                    metadata = read_metadata(fullpath)
+                    metadata = mp.read_metadata(fullpath)
                 except FileConnectorFileSystemIOError as err:
                     if err.errno in (errno.ENOENT, errno.ESTALE):
                         # Ignore removal from another entity.
@@ -929,11 +737,218 @@ def rmobjdir(dir_path, marker_dir_check=True):
         return True
 
 
-class XattrMetadataPersistence(object):
+class MetadataPersistence(object):
     def __init__(self, dev_path):
         self.dev_path = dev_path
 
-    def read_metadata(path, fd=None):
+    def read_metadata(self, path, fd=None):
+        metastr = self._read_metadata(path, fd)
+        if not metastr:
+            return {}
+
+        metadata = deserialize_metadata(metastr)
+        if not metadata:
+            # Empty dict i.e deserializing of metadata has failed, probably
+            # because it is invalid or incomplete or corrupt
+            self._clean_metadata(path)
+
+        assert isinstance(metadata, dict)
+        return metadata
+
+    def _read_metadata(self, path, fd=None):
+        raise NotImplementedError()
+
+    def _clean_metadata(self, path_or_fd):
+        raise NotImplementedError()
+
+    def write_metadata(self, path, metadata, fd=None):
+        md = metadata.copy()
+        if md.get(X_ETAG) and md[X_ETAG].endswith('-fetag'):
+            del md[X_ETAG]
+
+        self._write_metadata(path, md, fd)
+
+    def _write_metadata(self, path, metadata, fd=None):
+        raise NotImplementedError()
+
+    def restore_metadata(self, path, metadata, meta_orig):
+        if not meta_orig:
+            # Container and account metadata
+            meta_orig = self.read_metadata(path)
+        if meta_orig:
+            meta_new = meta_orig.copy()
+            meta_new.update(metadata)
+        else:
+            meta_new = metadata
+        if meta_orig != meta_new:
+            self.write_metadata(path, meta_new)
+        return meta_new
+
+    def get_object_metadata(self, obj_path_or_fd, stats=None,
+                            calculate_etag=True):
+        """
+        Return metadata of object.
+        """
+        if not stats:
+            if isinstance(obj_path_or_fd, int):
+                # We are given a file descriptor, so this is an invocation from
+                # the DiskFile.open() method.
+                stats = do_fstat(obj_path_or_fd)
+            else:
+                # We are given a path to the object when the
+                # DiskDir.list_objects_iter method invokes us.
+                stats = do_stat(obj_path_or_fd)
+
+        if not stats:
+            metadata = {}
+        else:
+            is_dir = stat.S_ISDIR(stats.st_mode)
+            if calculate_etag:
+                etag = md5().hexdigest() if is_dir else _get_etag(
+                    obj_path_or_fd)
+            else:
+                etag = '0000000000000000000000000000000-fetag'
+            metadata = {
+                X_TYPE: OBJECT,
+                X_TIMESTAMP: normalize_timestamp(stats.st_ctime),
+                X_CONTENT_TYPE: DIR_TYPE if is_dir else FILE_TYPE,
+                X_OBJECT_TYPE: DIR_NON_OBJECT if is_dir else FILE,
+                X_CONTENT_LENGTH: 0 if is_dir else stats.st_size,
+                X_ETAG: etag}
+        return metadata
+
+    def get_container_metadata(self, cont_path):
+        objects = []
+        object_count = 0
+        bytes_used = 0
+        objects, object_count, bytes_used = get_container_details(cont_path,
+                                                                  self)
+        metadata = {X_TYPE: CONTAINER,
+                    X_TIMESTAMP: normalize_timestamp(
+                        do_getctime(cont_path)),
+                    X_PUT_TIMESTAMP: normalize_timestamp(
+                        do_getmtime(cont_path)),
+                    X_OBJECTS_COUNT: object_count,
+                    X_BYTES_USED: bytes_used}
+        return _add_timestamp(metadata)
+
+    def create_object_metadata(self, path, fd=None, stats=None,
+                               existing_meta={}, calculate_etag=True):
+        # We must accept either a path or a file descriptor as an argument to
+        # this method, as the diskfile modules uses a file descriptior and the
+        # DiskDir module (for container operations) uses a path.
+        if fd:
+            path = fd
+
+        metadata_from_stat = self.get_object_metadata(
+            path, stats, calculate_etag)
+
+        return self.restore_metadata(
+            path, metadata_from_stat, existing_meta)
+
+    def create_container_metadata(self, cont_path):
+        metadata = self.get_container_metadata(cont_path)
+        rmd = self.restore_metadata(cont_path, metadata, {})
+        return rmd
+
+    def create_account_metadata(self, acc_path):
+        metadata = get_account_metadata(acc_path)
+        rmd = self.restore_metadata(acc_path, metadata, {})
+        return rmd
+
+
+class JsonMetadataPersistence(MetadataPersistence):
+    def __init__(self, dev_path):
+        super(JsonMetadataPersistence, self).__init__(dev_path)
+        self.meta_dir = '.fc_meta'
+        self.obj_meta = 'obj_metadata.json'
+        self.cont_meta = 'container_metadata.json'
+
+    def _get_metadata_dir(self, path):
+        '''
+        Given a path to object, return a tuple:
+        A path to the directory to where the json file will be stored
+        and a path to the metadata json file itself.
+        '''
+        dir_path = os.path.dirname(path)
+        obj_name = os.path.basename(path)
+
+        if dir_path == self.dev_path:
+            # path for container
+            meta_dir_path = os.path.join(dir_path, obj_name, self.meta_dir)
+            meta_file_path = os.path.join(dir_path, obj_name, self.meta_dir,
+                                          self.cont_meta)
+        else:
+            # path for object
+            meta_dir_path = os.path.join(dir_path, self.meta_dir, obj_name)
+            meta_file_path = os.path.join(dir_path, self.meta_dir, obj_name,
+                                          self.obj_meta)
+
+        return meta_dir_path, meta_file_path
+
+    def _read_metadata(self, path, fd=None):
+        meta_dir_path, meta_file_path = self._get_metadata_dir(path)
+
+        metastr = ''
+        try:
+            with open(meta_file_path, 'rt') as f:
+                metastr = f.read()
+        except IOError as ioerr:
+            if ioerr.errno != errno.ENOENT:
+                raise
+
+        return metastr
+
+    def _clean_metadata(self, path_or_fd):
+        # TODO
+        pass
+
+    def _write_metadata(self, path, metadata, fd=None):
+        meta_dir_path, meta_file_path = self._get_metadata_dir(path)
+
+        # create metadata dir if it doesn't exist
+        # TODO error handling
+        if not os.path.exists(meta_dir_path):
+            mkdirs(meta_dir_path)
+
+        metastr = serialize_metadata(metadata)
+
+        tmpfile = meta_file_path + '_' + uuid4().hex
+        try:
+            with open(tmpfile, 'wt') as f:
+                f.write(metastr)
+        except IOError as err:
+            if err.errno in (errno.ENOSPC, errno.EDQUOT):
+                do_log_rl("_write_metadata failed: %s : %s",
+                          err, meta_file_path)
+                raise DiskFileNoSpace()
+            else:
+                raise FileConnectorFileSystemIOError(
+                    err.errno,
+                    '_write_metadata failed: %s : %s' %
+                    (err, meta_file_path))
+
+        try:
+            do_rename(tmpfile, meta_file_path)
+        except OSError as err:
+            # TODO better error handling
+            raise FileConnectorFileSystemOSError(
+                err.errno, "%s, rename('%s', '%s')" % (
+                    err.strerror, tmpfile, meta_file_path))
+
+    def create_object_metadata(self, path, fd=None, stats=None,
+                               existing_meta={}, calculate_etag=True):
+        # don't send fd
+        return super(JsonMetadataPersistence, self).create_object_metadata(
+            path, fd=None, stats=stats, existing_meta=existing_meta,
+            calculate_etag=calculate_etag)
+
+
+class XattrMetadataPersistence(MetadataPersistence):
+    def __init__(self, dev_path):
+        super(XattrMetadataPersistence, self).__init__(dev_path)
+
+    def _read_metadata(self, path, fd=None):
         """
         Helper function to read the serialized metadata from a File/Directory.
 
@@ -945,14 +960,12 @@ class XattrMetadataPersistence(object):
         """
         if fd:
             path = fd
-        return read_metadata_from_xattr(path)
 
-    def read_metadata_from_xattr(path_or_fd):
         metastr = ''
         key = 0
         try:
             while True:
-                metastr += do_getxattr(path_or_fd, '%s%s' %
+                metastr += do_getxattr(path, '%s%s' %
                                        (METADATA_KEY, (key or '')))
                 key += 1
                 if len(metastr) < MAX_XATTR_SIZE:
@@ -962,19 +975,9 @@ class XattrMetadataPersistence(object):
             if err.errno != errno.ENODATA:
                 raise
 
-        if not metastr:
-            return {}
+        return metastr
 
-        metadata = deserialize_metadata(metastr)
-        if not metadata:
-            # Empty dict i.e deserializing of metadata has failed, probably
-            # because it is invalid or incomplete or corrupt
-            clean_metadata(path_or_fd)
-
-        assert isinstance(metadata, dict)
-        return metadata
-
-    def write_metadata(path, metadata, fd=None):
+    def _write_metadata(self, path, metadata, fd=None):
         """
         Helper function to write serialized metadata for a File/Directory.
 
@@ -986,37 +989,54 @@ class XattrMetadataPersistence(object):
         if fd:
             path = fd
 
-        md = metadata.copy()
-        if md.get(X_ETAG) and md[X_ETAG].endswith('-fetag'):
-            del md[X_ETAG]
-
-        write_metadata_to_xattr(path, md)
-
-    def write_metadata_to_xattr(path_or_fd, metadata):
         assert isinstance(metadata, dict)
         metastr = serialize_metadata(metadata)
         key = 0
         while metastr:
             try:
-                do_setxattr(path_or_fd,
+                do_setxattr(path,
                             '%s%s' % (METADATA_KEY, key or ''),
                             metastr[:MAX_XATTR_SIZE])
             except IOError as err:
                 if err.errno in (errno.ENOSPC, errno.EDQUOT):
-                    if isinstance(path_or_fd, int):
-                        filename = get_filename_from_fd(path_or_fd)
+                    if isinstance(path, int):
+                        filename = get_filename_from_fd(path)
                         do_log_rl("write_metadata(%d, md) failed: %s : %s",
-                                  path_or_fd, err, filename)
+                                  path, err, filename)
                     else:
                         do_log_rl("write_metadata(%s, md) failed: %s",
-                                  path_or_fd, err)
+                                  path, err)
                     raise DiskFileNoSpace()
                 else:
                     raise FileConnectorFileSystemIOError(
                         err.errno,
-                        'setxattr("%s", %s, metastr)' % (path_or_fd, key))
+                        'setxattr("%s", %s, metastr)' % (path, key))
             metastr = metastr[MAX_XATTR_SIZE:]
             key += 1
+
+    def _clean_metadata(self, path_or_fd):
+        key = 0
+        while True:
+            try:
+                do_removexattr(
+                    path_or_fd, '%s%s' % (METADATA_KEY, (key or '')))
+            except IOError as err:
+                if err.errno == errno.ENODATA:
+                    break
+                raise FileConnectorFileSystemIOError(
+                    err.errno, 'removexattr("%s", %s)' % (path_or_fd, key))
+            key += 1
+
+
+def get_metadata_persistence(dev_path, mode=None):
+    if not mode:
+        mode = _mp_mode
+
+    if mode == 'xattr':
+        mp = XattrMetadataPersistence(dev_path)
+    else:
+        mp = JsonMetadataPersistence(dev_path)
+    return mp
 
 
 DT_UNKNOWN = 0
@@ -1074,6 +1094,9 @@ def _walk(top, topdown=True, onerror=None, followlinks=False):
 
     try:
         for entry in scandir.scandir(top):
+            if entry.name.startswith('.fc_meta'):
+                continue
+
             if entry.is_dir():
                 dirs.append(entry)
             else:

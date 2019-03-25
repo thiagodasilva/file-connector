@@ -26,12 +26,14 @@ import tarfile
 import shutil
 import cPickle as pickle
 from collections import defaultdict
-from mock import patch, Mock
+from mock import patch, mock_open, Mock
 from file_connector.swift.common import utils
 from file_connector.swift.common.utils import deserialize_metadata, \
-    serialize_metadata, PICKLE_PROTOCOL
+    serialize_metadata, PICKLE_PROTOCOL, XattrMetadataPersistence, \
+    JsonMetadataPersistence
 from file_connector.swift.common.exceptions import FileConnectorFileSystemOSError,\
     FileConnectorFileSystemIOError
+from file_connector.swift.common.fs_utils import mkdirs
 from swift.common.exceptions import DiskFileNoSpace
 from test.unit import DATA_DIR
 
@@ -174,11 +176,171 @@ class TestSafeUnpickler(unittest.TestCase):
                     self.fail("Expecting cPickle.UnpicklingError")
 
 
+class TestJsonMetadataPersistence(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.mp = JsonMetadataPersistence(self.td)
+
+    def tearDown(self):
+        shutil.rmtree(self.td)
+
+    def test_get_metadata_dir_obj(self):
+        path = os.path.join(self.td, 'cont/obj')
+        expected_dir = os.path.join(self.td, 'cont', self.mp.meta_dir, 'obj')
+        expected_file = os.path.join(self.td, 'cont', self.mp.meta_dir, 'obj',
+                                     self.mp.obj_meta)
+        dir_path, file_path = self.mp._get_metadata_dir(path)
+
+        self.assertEqual(expected_dir, dir_path)
+        self.assertEqual(expected_file, file_path)
+
+        # subdirs sanity
+        path = os.path.join(self.td, 'cont/subdir1/subdir2/obj')
+        expected_dir = os.path.join(self.td, 'cont/subdir1/subdir2',
+                                    self.mp.meta_dir, 'obj')
+        expected_file = os.path.join(self.td, 'cont/subdir1/subdir2',
+                                     self.mp.meta_dir, 'obj',
+                                     self.mp.obj_meta)
+        dir_path, file_path = self.mp._get_metadata_dir(path)
+
+        self.assertEqual(expected_dir, dir_path)
+        self.assertEqual(expected_file, file_path)
+
+    def test_get_metadata_dir_cont(self):
+        path = os.path.join(self.td, 'cont')
+        expected_dir = os.path.join(self.td, 'cont', self.mp.meta_dir)
+        expected_file = os.path.join(self.td, 'cont', self.mp.meta_dir,
+                                     self.mp.cont_meta)
+        dir_path, file_path = self.mp._get_metadata_dir(path)
+
+        self.assertEqual(expected_dir, dir_path)
+        self.assertEqual(expected_file, file_path)
+
+    def test_write_metadata(self):
+        path = os.path.join(self.td, 'cont/obj')
+        md_file = os.path.join(self.td, 'cont', self.mp.meta_dir,
+                               'obj', self.mp.obj_meta)
+        orig_d = {'bar': 'foo'}
+        self.mp.write_metadata(path, orig_d)
+        try:
+            with open(md_file, 'rt') as f:
+                md = utils.deserialize_metadata(f.read())
+        except Exception as e:
+            self.fail(e)
+
+        expected_md = {'bar': 'foo'}
+        self.assertEqual(expected_md, md)
+
+    def test_write_metadata_etag(self):
+        # don't store fake etag
+        path = "/tmp/foo/cont/obj"
+        md_file = os.path.join('/tmp/foo/cont', self.mp.meta_dir,
+                               'obj', self.mp.obj_meta)
+        orig_d = {'bar': 'foo', 'ETag': 'bla-fetag'}
+        self.mp.write_metadata(path, orig_d)
+        try:
+            with open(md_file, 'rt') as f:
+                md = utils.deserialize_metadata(f.read())
+        except Exception as e:
+            self.fail(e)
+
+        # but store a real etag
+        expected_md = {'bar': 'foo'}
+        self.assertEqual(expected_md, md)
+
+        orig_d = {'bar': 'foo', 'ETag': 'realetag'}
+        self.mp.write_metadata(path, orig_d)
+        try:
+            with open(md_file, 'rt') as f:
+                md = utils.deserialize_metadata(f.read())
+        except Exception as e:
+            self.fail(e)
+
+        expected_md = {'bar': 'foo', 'ETag': 'realetag'}
+        self.assertEqual(expected_md, md)
+
+    def test_write_metadata_write_fail_nospace(self):
+        write_mock = Mock(side_effect=IOError(errno.ENOSPC, "fail"))
+        path = "/tmp/foo/cont/obj"
+        orig_d = {'bar': 'foo'}
+        mo = mock_open()
+        with patch('__builtin__.open', mo):
+            mock_file = mo.return_value
+            mock_file.write = write_mock
+            self.assertRaises(
+                DiskFileNoSpace,
+                self.mp.write_metadata, path, orig_d)
+
+    def test_write_metadata_fail(self):
+        write_mock = Mock(side_effect=IOError(errno.EIO, "fail"))
+        path = os.path.join(self.td, 'cont/obj')
+        orig_d = {'bar': 'foo'}
+        mo = mock_open()
+        with patch('__builtin__.open', mo):
+            mock_file = mo.return_value
+            mock_file.write = write_mock
+            self.assertRaises(
+                FileConnectorFileSystemIOError,
+                self.mp.write_metadata, path, orig_d)
+
+    def test_write_metadata_rename_fail(self):
+        rename_mock = Mock(side_effect=OSError('failed rename'))
+        path = os.path.join(self.td, 'cont/obj')
+        orig_d = {'bar': 'foo'}
+        with patch('os.rename', rename_mock):
+            self.assertRaises(
+                FileConnectorFileSystemOSError,
+                self.mp.write_metadata, path, orig_d)
+
+    def test_read_obj_metadata(self):
+        path = os.path.join(self.td, 'cont/obj')
+        md_dir = os.path.join(self.td, 'cont', self.mp.meta_dir, 'obj')
+        md_file = os.path.join(self.td, 'cont', self.mp.meta_dir,
+                               'obj', self.mp.obj_meta)
+        orig_d = {'bar': 'foo'}
+        mkdirs(md_dir)
+        with open(md_file, 'wt') as f:
+            f.write(serialize_metadata(orig_d))
+
+        md = self.mp.read_metadata(path)
+        self.assertEqual(orig_d, md)
+
+    def test_read_cont_metadata(self):
+        path = os.path.join(self.td, 'cont')
+        md_dir = os.path.join(self.td, 'cont', self.mp.meta_dir)
+        md_file = os.path.join(self.td, 'cont', self.mp.meta_dir,
+                               self.mp.cont_meta)
+        orig_d = {'bar': 'foo'}
+        mkdirs(md_dir)
+        with open(md_file, 'wt') as f:
+            f.write(serialize_metadata(orig_d))
+
+        md = self.mp.read_metadata(path)
+        self.assertEqual(orig_d, md)
+
+    def test_read_metadata_nofile(self):
+        path = os.path.join(self.td, 'cont/obj')
+        md = self.mp.read_metadata(path)
+        self.assertEqual({}, md)
+
+    def test_read_metadata_fail(self):
+        read_mock = Mock(side_effect=IOError(errno.EIO, "fail"))
+        path = os.path.join(self.td, 'cont/obj')
+        mo = mock_open()
+        with patch('__builtin__.open', mo):
+            mock_file = mo.return_value
+            mock_file.read = read_mock
+            self.assertRaises(
+                IOError,
+                self.mp.read_metadata, path)
+
+
 class TestUtils(unittest.TestCase):
     """ Tests for common.utils """
 
     def setUp(self):
         _initxattr()
+        self.mp = XattrMetadataPersistence('/tmp/foo')
 
     def tearDown(self):
         _destroyxattr()
@@ -186,12 +348,12 @@ class TestUtils(unittest.TestCase):
     def test_write_metadata(self):
         path = "/tmp/foo/w"
         orig_d = {'bar': 'foo'}
-        utils.write_metadata(path, orig_d)
+        self.mp.write_metadata(path, orig_d)
         xkey = _xkey(path, utils.METADATA_KEY)
-        assert len(_xattrs.keys()) == 1
-        assert xkey in _xattrs
-        assert orig_d == deserialize_metadata(_xattrs[xkey])
-        assert _xattr_op_cnt['set'] == 1
+        self.assertEqual(1, len(_xattrs))
+        self.assertIn(xkey, _xattrs)
+        self.assertEqual(orig_d, deserialize_metadata(_xattrs[xkey]))
+        self.assertEqual(_xattr_op_cnt['set'], 1)
 
     def test_write_metadata_err(self):
         path = "/tmp/foo/w"
@@ -199,7 +361,7 @@ class TestUtils(unittest.TestCase):
         xkey = _xkey(path, utils.METADATA_KEY)
         _xattr_set_err[xkey] = errno.EOPNOTSUPP
         try:
-            utils.write_metadata(path, orig_d)
+            self.mp.write_metadata(path, orig_d)
         except IOError as e:
             assert e.errno == errno.EOPNOTSUPP
             assert len(_xattrs.keys()) == 0
@@ -216,14 +378,14 @@ class TestUtils(unittest.TestCase):
             path = "/tmp/foo/w"
             orig_d = {'bar': 'foo'}
             try:
-                utils.write_metadata(path, orig_d)
+                self.mp.write_metadata(path, orig_d)
             except DiskFileNoSpace:
                 pass
             else:
                 self.fail("Expected DiskFileNoSpace exception")
             fd = 0
             try:
-                utils.write_metadata(fd, orig_d)
+                self.mp.write_metadata(fd, orig_d)
             except DiskFileNoSpace:
                 pass
             else:
@@ -233,7 +395,7 @@ class TestUtils(unittest.TestCase):
         # At 64 KB an xattr key/value pair, this should generate three keys.
         path = "/tmp/foo/w"
         orig_d = {'bar': 'x' * 150000}
-        utils.write_metadata(path, orig_d)
+        self.mp.write_metadata(path, orig_d)
         self.assertEqual(len(_xattrs.keys()), 3,
                          "Expected 3 keys, found %d" % len(_xattrs.keys()))
         payload = ''
@@ -254,7 +416,7 @@ class TestUtils(unittest.TestCase):
             _xattrs[xkey] = expected_p[:utils.MAX_XATTR_SIZE]
             expected_p = expected_p[utils.MAX_XATTR_SIZE:]
         assert not expected_p
-        utils.clean_metadata(path)
+        self.mp._clean_metadata(path)
         assert _xattr_op_cnt['remove'] == 4, "%r" % _xattr_op_cnt
 
     def test_clean_metadata_err(self):
@@ -263,7 +425,7 @@ class TestUtils(unittest.TestCase):
         _xattrs[xkey] = serialize_metadata({'a': 'y'})
         _xattr_rem_err[xkey] = errno.EOPNOTSUPP
         try:
-            utils.clean_metadata(path)
+            self.mp._clean_metadata(path)
         except IOError as e:
             assert e.errno == errno.EOPNOTSUPP
             assert _xattr_op_cnt['remove'] == 1, "%r" % _xattr_op_cnt
@@ -275,14 +437,14 @@ class TestUtils(unittest.TestCase):
         expected_d = {'a': 'y'}
         xkey = _xkey(path, utils.METADATA_KEY)
         _xattrs[xkey] = serialize_metadata(expected_d)
-        res_d = utils.read_metadata(path)
+        res_d = self.mp.read_metadata(path)
         assert res_d == expected_d, "Expected %r, result %r" % \
             (expected_d, res_d)
         assert _xattr_op_cnt['get'] == 1, "%r" % _xattr_op_cnt
 
     def test_read_metadata_notfound(self):
         path = "/tmp/foo/r"
-        res_d = utils.read_metadata(path)
+        res_d = self.mp.read_metadata(path)
         assert res_d == {}
         assert _xattr_op_cnt['get'] == 1, "%r" % _xattr_op_cnt
 
@@ -293,7 +455,7 @@ class TestUtils(unittest.TestCase):
         _xattrs[xkey] = serialize_metadata(expected_d)
         _xattr_get_err[xkey] = errno.EOPNOTSUPP
         try:
-            utils.read_metadata(path)
+            self.mp.read_metadata(path)
         except IOError as e:
             assert e.errno == errno.EOPNOTSUPP
             assert (_xattr_op_cnt['get'] == 1), "%r" % _xattr_op_cnt
@@ -309,7 +471,7 @@ class TestUtils(unittest.TestCase):
             _xattrs[xkey] = expected_p[:utils.MAX_XATTR_SIZE]
             expected_p = expected_p[utils.MAX_XATTR_SIZE:]
         assert not expected_p
-        res_d = utils.read_metadata(path)
+        res_d = self.mp.read_metadata(path)
         assert res_d == expected_d, "Expected %r, result %r" % \
             (expected_d, res_d)
         assert _xattr_op_cnt['get'] == 4, "%r" % _xattr_op_cnt
@@ -323,14 +485,14 @@ class TestUtils(unittest.TestCase):
             _xattrs[xkey] = expected_p[:utils.MAX_XATTR_SIZE]
             expected_p = expected_p[utils.MAX_XATTR_SIZE:]
         assert len(expected_p) <= utils.MAX_XATTR_SIZE
-        res_d = utils.read_metadata(path)
+        res_d = self.mp.read_metadata(path)
         assert res_d == {}
         assert _xattr_op_cnt['get'] == 3, "%r" % _xattr_op_cnt
 
     def test_restore_metadata_none(self):
         # No initial metadata
         path = "/tmp/foo/i"
-        res_d = utils.restore_metadata(path, {'b': 'y'}, {})
+        res_d = self.mp.restore_metadata(path, {'b': 'y'}, {})
         expected_d = {'b': 'y'}
         self.assertEqual(
             res_d, expected_d,
@@ -343,7 +505,7 @@ class TestUtils(unittest.TestCase):
         initial_d = {'a': 'z'}
         xkey = _xkey(path, utils.METADATA_KEY)
         _xattrs[xkey] = serialize_metadata(initial_d)
-        res_d = utils.restore_metadata(path, {'b': 'y'}, initial_d)
+        res_d = self.mp.restore_metadata(path, {'b': 'y'}, initial_d)
         expected_d = {'a': 'z', 'b': 'y'}
         self.assertEqual(
             res_d, expected_d,
@@ -356,7 +518,7 @@ class TestUtils(unittest.TestCase):
         initial_d = {'a': 'z'}
         xkey = _xkey(path, utils.METADATA_KEY)
         _xattrs[xkey] = serialize_metadata(initial_d)
-        res_d = utils.restore_metadata(path, {}, initial_d)
+        res_d = self.mp.restore_metadata(path, {}, initial_d)
         expected_d = {'a': 'z'}
         self.assertEqual(res_d, expected_d,
                          "Expected %r, result %r" % (expected_d, res_d))
@@ -472,13 +634,13 @@ class TestUtils(unittest.TestCase):
         os.close(fd)
 
     def test_get_object_metadata_dne(self):
-        md = utils.get_object_metadata("/tmp/doesNotEx1st")
+        md = self.mp.get_object_metadata("/tmp/doesNotEx1st")
         assert md == {}
 
     def test_get_object_metadata_err(self):
         tf = tempfile.NamedTemporaryFile()
         try:
-            utils.get_object_metadata(
+            self.mp.get_object_metadata(
                 os.path.join(tf.name, "doesNotEx1st"))
         except FileConnectorFileSystemOSError as e:
             assert e.errno != errno.ENOENT
@@ -492,7 +654,7 @@ class TestUtils(unittest.TestCase):
         tf = tempfile.NamedTemporaryFile()
         tf.file.write('123')
         tf.file.flush()
-        md = utils.get_object_metadata(tf.name)
+        md = self.mp.get_object_metadata(tf.name)
         for key in self.obj_keys:
             assert key in md, "Expected key %s in %r" % (key, md)
         assert md[utils.X_TYPE] == utils.OBJECT
@@ -506,7 +668,7 @@ class TestUtils(unittest.TestCase):
     def test_get_object_metadata_dir(self):
         td = tempfile.mkdtemp()
         try:
-            md = utils.get_object_metadata(td)
+            md = self.mp.get_object_metadata(td)
             for key in self.obj_keys:
                 assert key in md, "Expected key %s in %r" % (key, md)
             assert md[utils.X_TYPE] == utils.OBJECT
@@ -523,14 +685,14 @@ class TestUtils(unittest.TestCase):
         tf = tempfile.NamedTemporaryFile()
         tf.file.write('4567')
         tf.file.flush()
-        r_md = utils.create_object_metadata(tf.name)
+        r_md = self.mp.create_object_metadata(tf.name)
 
         xkey = _xkey(tf.name, utils.METADATA_KEY)
         assert len(_xattrs.keys()) == 1
         assert xkey in _xattrs
         assert _xattr_op_cnt['set'] == 1
         md = deserialize_metadata(_xattrs[xkey])
-        assert r_md == md
+        self.assertEqual(r_md, md)
 
         for key in self.obj_keys:
             assert key in md, "Expected key %s in %r" % (key, md)
@@ -545,7 +707,7 @@ class TestUtils(unittest.TestCase):
     def test_create_object_metadata_dir(self):
         td = tempfile.mkdtemp()
         try:
-            r_md = utils.create_object_metadata(td)
+            r_md = self.mp.create_object_metadata(td)
 
             xkey = _xkey(td, utils.METADATA_KEY)
             assert len(_xattrs.keys()) == 1
@@ -567,7 +729,7 @@ class TestUtils(unittest.TestCase):
             os.rmdir(td)
 
     def test_get_container_metadata(self):
-        def _mock_get_container_details(path):
+        def _mock_get_container_details(path, mp):
             o_list = ['a', 'b', 'c']
             o_count = 3
             b_used = 47
@@ -585,7 +747,7 @@ class TestUtils(unittest.TestCase):
                 utils.X_OBJECTS_COUNT: (3, 0),
                 utils.X_BYTES_USED: (47, 0),
             }
-            md = utils.get_container_metadata(td)
+            md = self.mp.get_container_metadata(td)
             assert md == exp_md
         finally:
             utils.get_container_details = orig_gcd
@@ -622,7 +784,7 @@ class TestUtils(unittest.TestCase):
     def test_create_container_metadata(self):
         td = tempfile.mkdtemp()
         try:
-            r_md = utils.create_container_metadata(td)
+            r_md = self.mp.create_container_metadata(td)
 
             xkey = _xkey(td, utils.METADATA_KEY)
             assert len(_xattrs.keys()) == 1
@@ -650,7 +812,7 @@ class TestUtils(unittest.TestCase):
     def test_create_account_metadata(self):
         td = tempfile.mkdtemp()
         try:
-            r_md = utils.create_account_metadata(td)
+            r_md = self.mp.create_account_metadata(td)
 
             xkey = _xkey(td, utils.METADATA_KEY)
             assert len(_xattrs.keys()) == 1
@@ -702,7 +864,7 @@ class TestUtils(unittest.TestCase):
     def test_get_container_details_notadir(self):
         tf = tempfile.NamedTemporaryFile()
         obj_list, object_count, bytes_used = \
-            utils.get_container_details(tf.name)
+            utils.get_container_details(tf.name, self.mp)
         assert bytes_used == 0
         assert object_count == 0
         assert obj_list == []
@@ -720,7 +882,7 @@ class TestUtils(unittest.TestCase):
             utils._do_getsize = False
 
             obj_list, object_count, bytes_used = \
-                utils.get_container_details(td)
+                utils.get_container_details(td, self.mp)
             assert bytes_used == 0, repr(bytes_used)
             # Should not include the directories
             assert object_count == 5, repr(object_count)
@@ -745,7 +907,7 @@ class TestUtils(unittest.TestCase):
             utils._do_getsize = True
 
             obj_list, object_count, bytes_used = \
-                utils.get_container_details(td)
+                utils.get_container_details(td, self.mp)
             assert bytes_used == 30, repr(bytes_used)
             assert object_count == 5, repr(object_count)
             assert set(obj_list) == set(['file1', 'file3', 'file2',
@@ -875,6 +1037,7 @@ class TestUtilsDirObjects(unittest.TestCase):
             'dir1/dir2/file3']
         self.tempdir = tempfile.mkdtemp()
         self.rootdir = os.path.join(self.tempdir, 'a')
+        self.mp = XattrMetadataPersistence(self.rootdir)
         for d in self.dirs:
             os.makedirs(os.path.join(self.rootdir, d))
         for f in self.files:
@@ -885,37 +1048,37 @@ class TestUtilsDirObjects(unittest.TestCase):
         shutil.rmtree(self.tempdir)
 
     def _set_dir_object(self, obj):
-        metadata = utils.read_metadata(os.path.join(self.rootdir, obj))
+        metadata = self.mp.read_metadata(os.path.join(self.rootdir, obj))
         metadata[utils.X_OBJECT_TYPE] = utils.DIR_OBJECT
-        utils.write_metadata(os.path.join(self.rootdir, self.dirs[0]),
-                             metadata)
+        self.mp.write_metadata(os.path.join(self.rootdir, self.dirs[0]),
+                               metadata)
 
     def _clear_dir_object(self, obj):
-        metadata = utils.read_metadata(os.path.join(self.rootdir, obj))
+        metadata = self.mp.read_metadata(os.path.join(self.rootdir, obj))
         metadata[utils.X_OBJECT_TYPE] = utils.DIR_NON_OBJECT
-        utils.write_metadata(os.path.join(self.rootdir, obj),
-                             metadata)
+        self.mp.write_metadata(os.path.join(self.rootdir, obj),
+                               metadata)
 
     def test_rmobjdir_removing_files(self):
-        self.assertFalse(utils.rmobjdir(self.rootdir))
+        self.assertFalse(utils.rmobjdir(self.mp, self.rootdir))
 
         # Remove the files
         for f in self.files:
             os.unlink(os.path.join(self.rootdir, f))
 
-        self.assertTrue(utils.rmobjdir(self.rootdir))
+        self.assertTrue(utils.rmobjdir(self.mp, self.rootdir))
 
     def test_rmobjdir_removing_dirs(self):
-        self.assertFalse(utils.rmobjdir(self.rootdir))
+        self.assertFalse(utils.rmobjdir(self.mp, self.rootdir))
 
         # Remove the files
         for f in self.files:
             os.unlink(os.path.join(self.rootdir, f))
 
         self._set_dir_object(self.dirs[0])
-        self.assertFalse(utils.rmobjdir(self.rootdir))
+        self.assertFalse(utils.rmobjdir(self.mp, self.rootdir))
         self._clear_dir_object(self.dirs[0])
-        self.assertTrue(utils.rmobjdir(self.rootdir))
+        self.assertTrue(utils.rmobjdir(self.mp, self.rootdir))
 
     def test_rmobjdir_metadata_errors(self):
 
@@ -925,17 +1088,17 @@ class TestUtilsDirObjects(unittest.TestCase):
                 raise OSError(13, "foo")
             return {}
 
-        _orig_rm = utils.read_metadata
-        utils.read_metadata = _mock_rm
+        _orig_rm = self.mp.read_metadata
+        self.mp.read_metadata = _mock_rm
         try:
             try:
-                utils.rmobjdir(self.rootdir)
+                utils.rmobjdir(self.mp, self.rootdir)
             except OSError:
                 pass
             else:
                 self.fail("Expected OSError")
         finally:
-            utils.read_metadata = _orig_rm
+            self.mp.read_metadata = _orig_rm
 
     def test_rmobjdir_metadata_enoent(self):
 
@@ -943,23 +1106,23 @@ class TestUtilsDirObjects(unittest.TestCase):
             print "_mock_rm-metadata_enoent(%s)" % path
             shutil.rmtree(path)
             raise FileConnectorFileSystemIOError(errno.ENOENT,
-                                           os.strerror(errno.ENOENT))
+                                                 os.strerror(errno.ENOENT))
 
         # Remove the files
         for f in self.files:
             os.unlink(os.path.join(self.rootdir, f))
 
-        _orig_rm = utils.read_metadata
-        utils.read_metadata = _mock_rm
+        _orig_rm = self.mp.read_metadata
+        self.mp.read_metadata = _mock_rm
         try:
             try:
-                self.assertTrue(utils.rmobjdir(self.rootdir))
+                self.assertTrue(utils.rmobjdir(self.mp, self.rootdir))
             except IOError:
                 self.fail("Unexpected IOError")
             else:
                 pass
         finally:
-            utils.read_metadata = _orig_rm
+            self.mp.read_metadata = _orig_rm
 
     def test_rmobjdir_rmdir_enoent(self):
 
@@ -982,7 +1145,7 @@ class TestUtilsDirObjects(unittest.TestCase):
         utils.do_rmdir = _mock_rm
         try:
             try:
-                self.assertTrue(utils.rmobjdir(self.rootdir))
+                self.assertTrue(utils.rmobjdir(self.mp, self.rootdir))
             except OSError:
                 self.fail("Unexpected OSError")
             else:
@@ -1010,7 +1173,7 @@ class TestUtilsDirObjects(unittest.TestCase):
         utils.do_rmdir = _mock_rm
         try:
             try:
-                utils.rmobjdir(self.rootdir)
+                utils.rmobjdir(self.mp, self.rootdir)
             except OSError:
                 pass
             else:
@@ -1044,7 +1207,7 @@ class TestUtilsDirObjects(unittest.TestCase):
         utils.do_rmdir = _mock_rm
         try:
             try:
-                self.assertFalse(utils.rmobjdir(self.rootdir))
+                self.assertFalse(utils.rmobjdir(self.mp, self.rootdir))
             except OSError:
                 self.fail("Unexpected OSError")
             else:
@@ -1077,7 +1240,7 @@ class TestUtilsDirObjects(unittest.TestCase):
         utils.do_rmdir = _mock_rm
         try:
             try:
-                utils.rmobjdir(self.rootdir)
+                utils.rmobjdir(self.mp, self.rootdir)
             except OSError:
                 pass
             else:
