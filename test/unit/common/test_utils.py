@@ -236,7 +236,7 @@ class TestJsonMetadataPersistence(unittest.TestCase):
         path = "/tmp/foo/cont/obj"
         md_file = os.path.join('/tmp/foo/cont', self.mp.meta_dir,
                                'obj', self.mp.obj_meta)
-        orig_d = {'bar': 'foo', 'ETag': 'bla-fetag'}
+        orig_d = {'bar': 'foo', 'ETag': 'pfs-fcetag'}
         self.mp.write_metadata(path, orig_d)
         try:
             with open(md_file, 'rt') as f:

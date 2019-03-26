@@ -73,6 +73,7 @@ DEFAULT_UID = -1
 DEFAULT_GID = -1
 PICKLE_PROTOCOL = 2
 CHUNK_SIZE = 65536
+FC_ETAG = 'pfs-fcetag'
 
 # TODO: look into removing this or read from fs.conf file again
 _read_pickled_metadata = True
@@ -763,7 +764,7 @@ class MetadataPersistence(object):
 
     def write_metadata(self, path, metadata, fd=None):
         md = metadata.copy()
-        if md.get(X_ETAG) and md[X_ETAG].endswith('-fetag'):
+        if md.get(X_ETAG) and md[X_ETAG] == FC_ETAG:
             del md[X_ETAG]
 
         self._write_metadata(path, md, fd)
@@ -807,7 +808,7 @@ class MetadataPersistence(object):
                 etag = md5().hexdigest() if is_dir else _get_etag(
                     obj_path_or_fd)
             else:
-                etag = '0000000000000000000000000000000-fetag'
+                etag = FC_ETAG
             metadata = {
                 X_TYPE: OBJECT,
                 X_TIMESTAMP: normalize_timestamp(stats.st_ctime),

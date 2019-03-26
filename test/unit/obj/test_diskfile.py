@@ -18,24 +18,31 @@
 import os
 import stat
 import errno
-import unittest
-import tempfile
-import shutil
 import mock
-from eventlet import tpool
+import re
+import shutil
+import tempfile
+import unittest
+
+
+import file_connector.swift.common.utils
+import file_connector.swift.obj.diskfile
+
+from eventlet import tpool, timeout, hubs
 from mock import Mock, patch
 from hashlib import md5
 from copy import deepcopy
 from contextlib import nested
-from file_connector.swift.common.exceptions import AlreadyExistsAsDir, \
-    AlreadyExistsAsFile
+
 from swift.common.exceptions import DiskFileNoSpace, DiskFileNotOpen, \
     DiskFileNotExist, DiskFileExpired
-from file_connector.swift.common.utils import ThreadPool
+from swift.common.splice import splice
+from swift.common.utils import get_md5_socket
 
-import file_connector.swift.common.utils
-from file_connector.swift.common.utils import normalize_timestamp
-import file_connector.swift.obj.diskfile
+from file_connector.swift.common.utils import ThreadPool
+from file_connector.swift.common.exceptions import AlreadyExistsAsDir, \
+    AlreadyExistsAsFile
+from file_connector.swift.common.utils import normalize_timestamp, FC_ETAG
 from file_connector.swift.obj.diskfile import DiskFileWriter, DiskFileManager
 from file_connector.swift.common.utils import DEFAULT_UID, DEFAULT_GID, \
     X_OBJECT_TYPE, DIR_OBJECT
@@ -227,12 +234,10 @@ class TestDiskFile(unittest.TestCase):
             fd.write("1234")
         stats = os.stat(the_file)
         ts = normalize_timestamp(stats.st_ctime)
-        etag = md5()
-        etag.update("1234")
-        etag = etag.hexdigest()
+        # ETag is calculated only after first read
         exp_md = {
             'Content-Length': 4,
-            'ETag': etag,
+            'ETag': FC_ETAG,
             'X-Timestamp': ts,
             'Content-Type': 'application/octet-stream'}
         gdf = _get_diskfile(self.mgr, "vol0", "p57", "ufo47", "bar", "z")
@@ -297,7 +302,8 @@ class TestDiskFile(unittest.TestCase):
         # change in file content
         self.assertNotEqual(md, init_md)
         self.assertEqual(md['Content-Length'], 8)
-        self.assertEqual(md['ETag'], md5("12345678").hexdigest())
+        # ETag is calculated only after first read
+        self.assertEqual(md['ETag'], FC_ETAG)
 
     def test_open_and_close(self):
         mock_close = Mock()
@@ -1257,3 +1263,120 @@ class TestDiskFile(unittest.TestCase):
             gdf.delete(0)
         self.assertFalse(_m_rmd.called)
         self.assertFalse(_m_do_unlink.called)
+
+    def _system_can_zero_copy(self):
+        if not splice.available:
+            return False
+
+        try:
+            get_md5_socket()
+        except IOError:
+            return False
+
+        return True
+
+    def test_zero_copy_cache_dropping(self):
+        if not self._system_can_zero_copy():
+            raise unittest.SkipTest("zero-copy support is missing")
+        self.mgr.pipe_size = 8
+
+        gdf = _create_and_get_diskfile(self.mgr, self.td, "vol0", "p57",
+                                       "ufo47", "bar", "z", fsize=163840)
+        with gdf.open():
+            reader = gdf.reader()
+
+        self.assertTrue(reader.can_zero_copy_send())
+        with mock.patch("file_connector.swift.obj.diskfile.DiskFileReader."
+                        "_drop_cache") as dbc:
+            with mock.patch("file_connector.swift.obj.diskfile."
+                            "DROP_CACHE_WINDOW", 4095):
+                with open('/dev/null', 'w') as devnull:
+                    reader.zero_copy_send(devnull.fileno())
+                expected = (4 * 10) + 1
+                self.assertEqual(len(dbc.mock_calls), expected)
+
+    def test_tee_to_md5_pipe_length_mismatch(self):
+        gdf = _create_and_get_diskfile(self.mgr, self.td, "vol0", "p57",
+                                       "ufo47", "bar", "z", fsize=16385)
+        with gdf.open():
+            reader = gdf.reader()
+        self.assertTrue(reader.can_zero_copy_send())
+
+        with mock.patch('file_connector.swift.obj.diskfile.tee') as mock_tee:
+            mock_tee.side_effect = lambda _1, _2, _3, cnt: cnt - 1
+
+            with open('/dev/null', 'w') as devnull:
+                exc_re = (r'tee\(\) failed: tried to move \d+ bytes, but only '
+                          'moved -?\d+')
+                try:
+                    reader.zero_copy_send(devnull.fileno())
+                except Exception as e:
+                    self.assertTrue(re.match(exc_re, str(e)))
+                else:
+                    self.fail('Expected Exception was not raised')
+
+    def test_splice_to_wsockfd_blocks(self):
+        gdf = _create_and_get_diskfile(self.mgr, self.td, "vol0", "p57",
+                                       "ufo47", "bar", "z", fsize=16385)
+        with gdf.open():
+            reader = gdf.reader()
+        self.assertTrue(reader.can_zero_copy_send())
+
+        def _run_test():
+            # Set up mock of `splice`
+            splice_called = [False]  # State hack
+
+            def fake_splice(fd_in, off_in, fd_out, off_out, len_, flags):
+                if fd_out == devnull.fileno() and not splice_called[0]:
+                    splice_called[0] = True
+                    err = errno.EWOULDBLOCK
+                    raise IOError(err, os.strerror(err))
+
+                return splice(fd_in, off_in, fd_out, off_out,
+                              len_, flags)
+
+            mock_splice.side_effect = fake_splice
+
+            # Set up mock of `trampoline`
+            # There are 2 reasons to mock this:
+            #
+            # - We want to ensure it's called with the expected arguments at
+            #   least once
+            # - When called with our write FD (which points to `/dev/null`), we
+            #   can't actually call `trampoline`, because adding such FD to an
+            #   `epoll` handle results in `EPERM`
+            def fake_trampoline(fd, read=None, write=None, timeout=None,
+                                timeout_exc=timeout.Timeout,
+                                mark_as_closed=None):
+                if write and fd == devnull.fileno():
+                    return
+                else:
+                    hubs.trampoline(fd, read=read, write=write,
+                                    timeout=timeout, timeout_exc=timeout_exc,
+                                    mark_as_closed=mark_as_closed)
+
+            mock_trampoline.side_effect = fake_trampoline
+
+            reader.zero_copy_send(devnull.fileno())
+
+            # Assert the end of `zero_copy_send` was reached
+            self.assertTrue(mock_close.called)
+            # Assert there was at least one call to `trampoline` waiting for
+            # `write` access to the output FD
+            mock_trampoline.assert_any_call(devnull.fileno(), write=True)
+            # Assert at least one call to `splice` with the output FD we expect
+            for call in mock_splice.call_args_list:
+                args = call[0]
+                if args[2] == devnull.fileno():
+                    break
+            else:
+                self.fail('`splice` not called with expected arguments')
+
+        with mock.patch('file_connector.swift.obj.diskfile.splice') as \
+                mock_splice:
+            with mock.patch.object(
+                    reader, 'close', side_effect=reader.close) as mock_close:
+                with open('/dev/null', 'w') as devnull:
+                    with mock.patch('file_connector.swift.obj.diskfile.'
+                                    'trampoline') as mock_trampoline:
+                        _run_test()
