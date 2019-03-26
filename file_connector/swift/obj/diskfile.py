@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import binascii
+import errno
+import fcntl
 import os
 import stat
-import errno
-from collections import defaultdict
 try:
     from random import SystemRandom
     random = SystemRandom()
@@ -24,19 +25,26 @@ except ImportError:
     import random
 import logging
 import time
+
+from collections import defaultdict
+from contextlib import contextmanager
+from eventlet import sleep
+from eventlet.hubs import trampoline
 from hashlib import md5
 from uuid import uuid4
-from eventlet import sleep
-from swift.common.utils import Timestamp, config_true_value
-from contextlib import contextmanager
-from file_connector.swift.common.exceptions import AlreadyExistsAsFile, \
-    AlreadyExistsAsDir, DiskFileContainerDoesNotExist
-from file_connector.swift.common.utils import ThreadPool
+
+from swift.obj.diskfile import DiskFileManager as SwiftDiskFileManager
 from swift.common.exceptions import DiskFileNotExist, DiskFileError, \
     DiskFileNoSpace, DiskFileDeviceUnavailable, DiskFileNotOpen, \
     DiskFileExpired
+from swift.common.splice import splice, tee
 from swift.common.swob import multi_range_iterator
+from swift.common.utils import Timestamp, config_true_value, get_md5_socket, \
+    F_SETPIPE_SZ, MD5_OF_EMPTY_STRING
 
+from file_connector.swift.common.exceptions import AlreadyExistsAsFile, \
+    AlreadyExistsAsDir, DiskFileContainerDoesNotExist
+from file_connector.swift.common.utils import ThreadPool
 from file_connector.swift.common.exceptions import \
     FileConnectorFileSystemOSError
 from file_connector.swift.common.fs_utils import do_fstat, do_open, do_close, \
@@ -48,7 +56,6 @@ from file_connector.swift.common.utils import X_CONTENT_TYPE, \
     X_TIMESTAMP, X_TYPE, X_OBJECT_TYPE, FILE, OBJECT, DIR_TYPE, \
     FILE_TYPE, DEFAULT_UID, DEFAULT_GID, DIR_NON_OBJECT, DIR_OBJECT, \
     X_ETAG, X_CONTENT_LENGTH
-from swift.obj.diskfile import DiskFileManager as SwiftDiskFileManager
 
 # FIXME: Hopefully we'll be able to move to Python 2.7+ where O_CLOEXEC will
 # be back ported. See http://www.python.org/dev/peps/pep-0433/
@@ -56,6 +63,7 @@ O_CLOEXEC = 02000000
 
 MAX_RENAME_ATTEMPTS = 10
 MAX_OPEN_ATTEMPTS = 10
+DROP_CACHE_WINDOW = 1024 * 1024
 
 
 def _random_sleep():
@@ -223,6 +231,9 @@ class DiskFileManager(SwiftDiskFileManager):
             conf.get('persist_metadata', 'true'))
         self.threadpools = defaultdict(
             lambda: ThreadPool(nthreads=threads_per_disk))
+        with open('/proc/sys/fs/pipe-max-size') as f:
+            max_pipe_size = int(f.read())
+        self.pipe_size = min(max_pipe_size, self.disk_chunk_size)
 
     def get_diskfile(self, device, partition, account, container, obj,
                      policy=None, **kwargs):
@@ -629,21 +640,28 @@ class DiskFileReader(object):
         The arguments to the constructor are considered implementation
         specific. The API does not define the constructor arguments.
 
-    :param fp: open file descriptor, -1 for a directory object
+    :param fd: open file descriptor, -1 for a directory object
     :param threadpool: thread pool to use for read operations
     :param disk_chunk_size: size of reads from disk in bytes
+    :param pipe_size: size of pipe buffer used in zero-copy operations
     :param obj_size: size of object on disk
+    :param etag: expected metadata etag value for entire file
     :param keep_cache_size: maximum object size that will be kept in cache
+    :param diskfile: the diskfile creating this DiskFileReader instance
     :param iter_hook: called when __iter__ returns a chunk
     :param keep_cache: should resulting reads be kept in the buffer cache
     """
-    def __init__(self, fd, threadpool, disk_chunk_size, obj_size,
-                 keep_cache_size, iter_hook=None, keep_cache=False):
+    def __init__(self, fd, threadpool, disk_chunk_size, pipe_size, obj_size,
+                 etag, keep_cache_size, diskfile, iter_hook=None,
+                 keep_cache=False):
         # Parameter tracking
         self._fd = fd
         self._threadpool = threadpool
         self._disk_chunk_size = disk_chunk_size
         self._iter_hook = iter_hook
+        self._pipe_size = pipe_size
+        self._diskfile = diskfile
+        self._etag = etag
         if keep_cache:
             # Caller suggests we keep this in cache, only do it if the
             # object's size is less than the maximum.
@@ -653,12 +671,17 @@ class DiskFileReader(object):
 
         # Internal Attributes
         self._suppress_file_closing = False
+        self._bytes_read = 0
+        self._read_to_eof = False
+        self._md5_of_sent_bytes = None
 
     def __iter__(self):
         """Returns an iterator over the data file."""
         try:
             dropped_cache = 0
             bytes_read = 0
+            self._started_at_0 = False
+            self._read_to_eof = False
             while True:
                 if self._fd != -1:
                     chunk = self._threadpool.run_in_thread(
@@ -675,6 +698,7 @@ class DiskFileReader(object):
                     if self._iter_hook:
                         self._iter_hook()
                 else:
+                    self._read_to_eof = True
                     diff = bytes_read - dropped_cache
                     if diff > 0:
                         self._drop_cache(dropped_cache, diff)
@@ -682,6 +706,114 @@ class DiskFileReader(object):
         finally:
             if not self._suppress_file_closing:
                 self.close()
+
+    def can_zero_copy_send(self):
+        # TODO: return always True for now
+        # return self._use_splice
+        return True
+
+    def zero_copy_send(self, wsockfd):
+        """
+        Does some magic with splice() and tee() to move stuff from disk to
+        network without ever touching userspace.
+
+        :param wsockfd: file descriptor (integer) of the socket out which to
+                        send data
+        """
+        # Note: if we ever add support for zero-copy ranged GET responses,
+        # we'll have to make this conditional.
+        self._started_at_0 = True
+
+        rfd = self._fd
+        client_rpipe, client_wpipe = os.pipe()
+        hash_rpipe, hash_wpipe = os.pipe()
+        md5_sockfd = get_md5_socket()
+
+        # The actual amount allocated to the pipe may be rounded up to the
+        # nearest multiple of the page size. If we have the memory allocated,
+        # we may as well use it.
+        #
+        # Note: this will raise IOError on failure, so we don't bother
+        # checking the return value.
+        pipe_size = fcntl.fcntl(client_rpipe, F_SETPIPE_SZ, self._pipe_size)
+        fcntl.fcntl(hash_rpipe, F_SETPIPE_SZ, pipe_size)
+
+        dropped_cache = 0
+        self._bytes_read = 0
+        try:
+            while True:
+                # Read data from disk to pipe
+                (bytes_in_pipe, _1, _2) = splice(
+                    rfd, None, client_wpipe, None, pipe_size, 0)
+                if bytes_in_pipe == 0:
+                    self._read_to_eof = True
+                    self._drop_cache(dropped_cache,
+                                     self._bytes_read - dropped_cache)
+                    break
+                self._bytes_read += bytes_in_pipe
+
+                # "Copy" data from pipe A to pipe B (really just some pointer
+                # manipulation in the kernel, not actual copying).
+                bytes_copied = tee(client_rpipe, hash_wpipe, bytes_in_pipe, 0)
+                if bytes_copied != bytes_in_pipe:
+                    # We teed data between two pipes of equal size, and the
+                    # destination pipe was empty. If, somehow, the destination
+                    # pipe was full before all the data was teed, we should
+                    # fail here. If we don't raise an exception, then we will
+                    # have the incorrect MD5 hash once the object has been
+                    # sent out, causing a false-positive quarantine.
+                    raise Exception("tee() failed: tried to move %d bytes, "
+                                    "but only moved %d" %
+                                    (bytes_in_pipe, bytes_copied))
+                # Take the data and feed it into an in-kernel MD5 socket. The
+                # MD5 socket hashes data that is written to it. Reading from
+                # it yields the MD5 checksum of the written data.
+                #
+                # Note that we don't have to worry about splice() returning
+                # None here (which happens on EWOULDBLOCK); we're splicing
+                # $bytes_in_pipe bytes from a pipe with exactly that many
+                # bytes in it, so read won't block, and we're splicing it into
+                # an MD5 socket, which synchronously hashes any data sent to
+                # it, so writing won't block either.
+                (hashed, _1, _2) = splice(hash_rpipe, None, md5_sockfd, None,
+                                          bytes_in_pipe, splice.SPLICE_F_MORE)
+                if hashed != bytes_in_pipe:
+                    raise Exception("md5 socket didn't take all the data? "
+                                    "(tried to write %d, but wrote %d)" %
+                                    (bytes_in_pipe, hashed))
+
+                while bytes_in_pipe > 0:
+                    try:
+                        res = splice(client_rpipe, None, wsockfd, None,
+                                     bytes_in_pipe, 0)
+                        bytes_in_pipe -= res[0]
+                    except IOError as exc:
+                        if exc.errno == errno.EWOULDBLOCK:
+                            trampoline(wsockfd, write=True)
+                        else:
+                            raise
+
+                if self._bytes_read - dropped_cache > DROP_CACHE_WINDOW:
+                    self._drop_cache(dropped_cache,
+                                     self._bytes_read - dropped_cache)
+                    dropped_cache = self._bytes_read
+        finally:
+            # Linux MD5 sockets return '00000000000000000000000000000000' for
+            # the checksum if you didn't write any bytes to them, instead of
+            # returning the correct value.
+            if self._bytes_read > 0:
+                bin_checksum = os.read(md5_sockfd, 16)
+                hex_checksum = binascii.hexlify(bin_checksum).decode('ascii')
+            else:
+                hex_checksum = MD5_OF_EMPTY_STRING
+            self._md5_of_sent_bytes = hex_checksum
+
+            os.close(client_rpipe)
+            os.close(client_wpipe)
+            os.close(hash_rpipe)
+            os.close(hash_wpipe)
+            os.close(md5_sockfd)
+            self.close()
 
     def app_iter_range(self, start, stop):
         """Returns an iterator over the data file for range (start, stop)"""
@@ -724,14 +856,32 @@ class DiskFileReader(object):
         if not self._keep_cache and self._fd > -1:
             do_fadvise64(self._fd, offset, length)
 
+    def _handle_etag_update(self):
+        """
+        If file still contains fake fileconnector etag
+        let's try to update after reading the file
+        """
+        if self._md5_of_sent_bytes and \
+                self._etag != self._md5_of_sent_bytes:
+
+            md = self._diskfile._metadata.copy()
+            md[X_ETAG] = self._md5_of_sent_bytes
+            self._diskfile.write_metadata(md)
+
     def close(self):
         """
         Close the open file handle if present.
         """
         if self._fd is not None:
-            fd, self._fd = self._fd, None
-            if fd > -1:
-                do_close(fd)
+            try:
+                if self._started_at_0 and self._read_to_eof:
+                    self._handle_etag_update()
+            except (Exception) as e:
+                logging.error('Failed to update etag: %s' % e)
+            finally:
+                fd, self._fd = self._fd, None
+                if fd > -1:
+                    do_close(fd)
 
 
 class DiskFile(object):
@@ -869,7 +1019,8 @@ class DiskFile(object):
                     self._data_file, self._fd)
             if not validate_object(self._metadata, self._stat):
                 self._metadata = self._mp.create_object_metadata(
-                    self._data_file, self._fd, self._stat, self._metadata)
+                    self._data_file, self._fd, self._stat, self._metadata,
+                    calculate_etag=False)
             assert self._metadata is not None
             self._filter_metadata()
 
@@ -1046,7 +1197,9 @@ class DiskFile(object):
             raise DiskFileNotOpen()
         dr = DiskFileReader(
             self._fd, self._threadpool, self._mgr.disk_chunk_size,
-            self._obj_size, self._mgr.keep_cache_size,
+            self._mgr.pipe_size,
+            self._obj_size, self._metadata[X_ETAG],
+            self._mgr.keep_cache_size, diskfile=self,
             iter_hook=iter_hook, keep_cache=keep_cache)
         # At this point the reader object is now responsible for closing
         # the file pointer.
