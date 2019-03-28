@@ -1,0 +1,10 @@
+#!/bin/sh
+echo
+echo "==================== FILE CONNECTOR AUTHENTICATION ===================="
+echo
+echo "Swift API Auth: http://127.0.0.1:8080/auth/v1.0 or http://<your Host IP>:<your exposed port>/auth/v1.0"
+echo "SwiftStack Auth Username: fileconnector:fcuser"
+echo "SwiftStack Auth Password: $FILE_CONNECTOR_SECRET"
+echo
+echo "======================================================================"
+echo
