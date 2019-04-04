@@ -1,0 +1,35 @@
+global
+    log /dev/log local0
+    log localhost local1 notice
+    maxconn 4096
+    daemon
+ 
+defaults
+    log global
+    mode http
+    option httplog
+    option dontlognull
+    retries 3
+    option redispatch
+    maxconn 2000
+    timeout connect 5000
+    timeout client 50000
+    timeout server 50000
+ 
+
+frontend http-in
+    bind *:8080
+    default_backend swift-proxy
+ 
+backend swift-proxy
+    stats enable
+    stats auth admin:admin
+    stats uri /haproxy?stats
+    balance roundrobin
+    #option httpchk HEAD /healthcheck HTTP/1.0
+    option forwardfor
+    option http-server-close
+    timeout http-keep-alive 500
+    server proxy1 192.168.0.15:8083 check inter 2000
+    server proxy2 192.168.0.15:8084 check inter 2000
+    server proxy3 192.168.0.15:8085 check inter 2000
