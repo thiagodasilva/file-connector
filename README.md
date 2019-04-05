@@ -44,9 +44,9 @@ docker run -d \
   swiftstack/file-connector
 ```
 
-You can now access your share using the swift client for example. The
-credentials are: account: ``fileconnector``, user: ``fcuser``, password:
-``<choose_your_secret>``
+You can now access a NAS share using the [swift client](https://github.com/openstack/python-swiftclient)
+for example. The credentials are: account: ``fileconnector``,
+ user: ``fcuser``, password: ``<choose_your_secret>``
 
 ### Clustered mode
 
