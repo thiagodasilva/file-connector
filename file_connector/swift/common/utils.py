@@ -73,7 +73,7 @@ DEFAULT_UID = -1
 DEFAULT_GID = -1
 PICKLE_PROTOCOL = 2
 CHUNK_SIZE = 65536
-FC_ETAG = 'pfs-fcetag'
+FC_ETAG = 'fcetag'
 
 # TODO: look into removing this or read from fs.conf file again
 _read_pickled_metadata = True
