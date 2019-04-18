@@ -17,6 +17,7 @@
 
 import os
 import errno
+import mock
 import tempfile
 import unittest
 import shutil
@@ -31,7 +32,8 @@ from time import time
 from swift.common.utils import normalize_timestamp
 from file_connector.swift.common import utils
 from file_connector.swift.common.utils import serialize_metadata, \
-    deserialize_metadata, XattrMetadataPersistence
+    deserialize_metadata, XattrMetadataPersistence, MetadataPersistence, \
+    get_metadata_persistence
 from test_utils import _initxattr, _destroyxattr, _setxattr, _getxattr
 from test.unit import FakeLogger, DATA_DIR
 
@@ -1154,9 +1156,9 @@ class TestAccountBroker(unittest.TestCase):
         # Test swift.common.db.AccountBroker.empty
         broker = self._get_broker(account='a')
         broker.initialize(self.initial_ts)
-        self.assert_(broker.empty())
+        self.assertTrue(broker.empty())
         c1 = self._create_container('c1')
-        self.assert_(not broker.empty())
+        self.assertFalse(broker.empty())
         os.rmdir(c1)
         self.assert_(broker.empty())
 
@@ -1428,12 +1430,15 @@ class TestDiskAccount(unittest.TestCase):
                 datadir = os.path.join(self.td, self.fake_drives[i])
                 fake_md = {"fake-drv-%d" % i: (True, 0)}
                 self.fake_md.append(fake_md)
-                fake_md_p = serialize_metadata(fake_md)
-                _setxattr(datadir, utils.METADATA_KEY, fake_md_p)
+                mp = get_metadata_persistence(datadir)
+                mp.write_metadata(datadir, fake_md)
             if i == 2:
                 # Third drive has valid account metadata
-                mp = XattrMetadataPersistence(datadir)
-                mp.create_account_metadata(datadir)
+                with patch('os.path.getctime', return_value=1), \
+                        patch('os.path.getmtime', return_value=1):
+                    datadir = os.path.join(self.td, self.fake_drives[i])
+                    mp = get_metadata_persistence(datadir)
+                    mp.create_account_metadata(datadir)
 
     def tearDown(self):
         _destroyxattr()
@@ -1472,7 +1477,9 @@ class TestDiskAccount(unittest.TestCase):
         self.assertEqual(info['object_count'], 0)
         self.assertEqual(info['bytes_used'], 0)
 
-    def test_constructor_no_metadata(self):
+    @patch('os.path.getctime', return_value=1)
+    @patch('os.path.getmtime', return_value=1)
+    def test_constructor_no_metadata(self, mockmtime, mockctime):
         da = dd.DiskAccount(self.td, self.fake_drives[0],
                             self.fake_accounts[0], self.fake_logger)
         assert da._dir_exists is True
@@ -1485,9 +1492,11 @@ class TestDiskAccount(unittest.TestCase):
             'X-Type': ('Account', 0),
             'X-PUT-Timestamp': (normalize_timestamp(mtime), 0),
             'X-Container-Count': (0, 0)}
-        assert da.metadata == exp_md, repr(da.metadata)
+        self.assertEqual(exp_md, da.metadata)
 
-    def test_constructor_metadata_not_valid(self):
+    @patch('os.path.getctime', return_value=1)
+    @patch('os.path.getmtime', return_value=1)
+    def test_constructor_metadata_not_valid(self, mockmtime, mockctime):
         da = dd.DiskAccount(self.td, self.fake_drives[1],
                             self.fake_accounts[1], self.fake_logger)
         assert da._dir_exists is True
@@ -1501,9 +1510,11 @@ class TestDiskAccount(unittest.TestCase):
             'X-PUT-Timestamp': (normalize_timestamp(mtime), 0),
             'X-Container-Count': (0, 0),
             'fake-drv-1': (True, 0)}
-        assert da.metadata == exp_md, repr(da.metadata)
+        self.assertEqual(exp_md, da.metadata)
 
-    def test_constructor_metadata_valid(self):
+    @patch('os.path.getctime', return_value=1)
+    @patch('os.path.getmtime', return_value=1)
+    def test_constructor_metadata_valid(self, mockmtime, mockctime):
         da = dd.DiskAccount(self.td, self.fake_drives[2],
                             self.fake_accounts[2], self.fake_logger)
         assert da._dir_exists is True
@@ -1516,7 +1527,7 @@ class TestDiskAccount(unittest.TestCase):
             'X-Type': ('Account', 0),
             'X-PUT-Timestamp': (normalize_timestamp(mtime), 0),
             'X-Container-Count': (0, 0)}
-        assert da.metadata == exp_md, repr(da.metadata)
+        self.assertEqual(exp_md, da.metadata)
 
     get_info_keys = set(['account', 'created_at', 'put_timestamp',
                          'delete_timestamp', 'container_count',
