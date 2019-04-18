@@ -698,12 +698,6 @@ class DiskAccount(DiskCommon):
         super(DiskAccount, self).__init__(root, drive, account, logger,
                                           **kwargs)
 
-        # TODO this is a bit of a hack, since the account dir is always going
-        # as we are not really persisting account metadata just yet
-        # datadir == /srv/fileconnector, so this is container's filesystem
-        # which does support xattr. User's share is mounted under
-        # /srv/fileconnector/[share_name].
-        self._mp = get_metadata_persistence(self.datadir, 'xattr')
         if self.account == 'gsexpiring':
             # Do not bother updating object count, container count and bytes
             # used. Return immediately before metadata validation and

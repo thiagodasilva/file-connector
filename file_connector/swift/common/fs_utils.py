@@ -160,6 +160,11 @@ def dir_empty(path):
     """
     try:
         files = do_listdir(path)
+        # add check for .fc_meta directories.
+        # Since these are "hidden" directories, they should not count
+        # when checking if a dir is empty
+        if files and len(files) == 1 and files[0] == '.fc_meta':
+            return True
         return not files
     except FileConnectorFileSystemOSError as err:
         if err.errno in (errno.ENOENT, errno.ESTALE):

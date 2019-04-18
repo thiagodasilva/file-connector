@@ -576,6 +576,8 @@ def get_account_details(acc_path):
     container_list = []
 
     for entry in gf_listdir(acc_path):
+        if entry.name.startswith('.fc_meta'):
+            continue
         if entry.is_dir() and \
                 entry.name not in (TEMP_DIR, ASYNCDIR, TRASHCAN):
             container_list.append(entry.name)
@@ -864,6 +866,7 @@ class JsonMetadataPersistence(MetadataPersistence):
         self.meta_dir = '.fc_meta'
         self.obj_meta = 'obj_metadata.json'
         self.cont_meta = 'container_metadata.json'
+        self.acc_meta = 'account_metadata.json'
 
     def _get_metadata_dir(self, path):
         '''
@@ -874,7 +877,11 @@ class JsonMetadataPersistence(MetadataPersistence):
         dir_path = os.path.dirname(path)
         obj_name = os.path.basename(path)
 
-        if dir_path == self.dev_path:
+        if path == self.dev_path:
+            # path for account
+            meta_dir_path = os.path.join(path, self.meta_dir)
+            meta_file_path = os.path.join(path, self.meta_dir, self.acc_meta)
+        elif dir_path == self.dev_path:
             # path for container
             meta_dir_path = os.path.join(dir_path, obj_name, self.meta_dir)
             meta_file_path = os.path.join(dir_path, obj_name, self.meta_dir,
