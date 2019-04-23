@@ -1,0 +1,39 @@
+version: '3'
+services:
+  file-connector-1:
+    image: swiftstack/file-connector
+    ports:
+      - "8083:8083"
+    volumes:
+      - /mnt/fcdata:/srv/fileconnector/fcdata
+    environment:
+      FILE_CONNECTOR_SECRET: password
+      MEMCACHE_SERVERS: memcached-service:11211
+  file-connector-2:
+    image: swiftstack/file-connector
+    ports:
+      - "8084:8083"
+    volumes:
+      - /mnt/fcdata:/srv/fileconnector/fcdata
+    environment:
+      FILE_CONNECTOR_SECRET: password
+      MEMCACHE_SERVERS: memcached-service:11211
+  file-connector-3:
+    image: swiftstack/file-connector
+    ports:
+      - "8085:8083"
+    volumes:
+      - /mnt/fcdata:/srv/fileconnector/fcdata
+    environment:
+      FILE_CONNECTOR_SECRET: password
+      MEMCACHE_SERVERS: memcached-service:11211
+  haproxy-service:
+    image: haproxy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./haproxy_config:/usr/local/etc/haproxy:ro
+  memcached-service:
+    image: memcached
+    ports:
+      - "11211:11211"

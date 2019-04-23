@@ -1,0 +1,11 @@
+version: '3'
+services:
+  file-connector-1:
+    image: swiftstack/file-connector
+    ports:
+      - "8083:8083"
+    volumes:
+      - /mnt/fcdata:/srv/fileconnector/fcdata
+    environment:
+      FILE_CONNECTOR_SECRET: password
+

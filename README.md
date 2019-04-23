@@ -28,7 +28,9 @@ The file ``/mnt/nfs_share/dir/foo`` will have its metadata saved under ``/mnt/nf
 ## How-To run
 
 File Connector is packaged as a docker container. You can run it as a single
-instance or in clustered mode.
+instance or in clustered mode. There are sample Compose files
+under the ``examples`` directory to quickly get started or read below for
+details on the different options that can be set to run.
 
 ### Single instance mode
 
@@ -56,5 +58,5 @@ like, making sure to update the port mapping but re-use the same
 ``FILE_CONNECTOR_SECRET`` for all containers. You will also need to pass a new
 environment variable to set the memcache server in the File Connector.
 
-Refer to [run_cluster_sample.sh](run_cluster_sample.sh) as an example of how
+Refer to [examples/cluster](examples/cluster) as an example of how
 to run all services as docker containers.
