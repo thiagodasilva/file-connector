@@ -1313,6 +1313,8 @@ class DiskFile(object):
             # Delete file object
             do_unlink(self._data_file)
 
+        self._mp.delete_metadata(self._data_file)
+
         # Garbage collection of non-object directories.  Now that we
         # deleted the file, determine if the current directory and any
         # parent directory may be deleted.
