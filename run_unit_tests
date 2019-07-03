@@ -1,0 +1,24 @@
+#!/bin/bash
+
+set -e
+
+# The following method is cross-platform (OS X and Linux)
+MYDIR=$(python -c 'import os,sys;print(os.path.dirname(os.path.realpath(sys.argv[1])))' $0)
+cd "$MYDIR"
+
+# Make sure container is running
+./rebuild_and_start_fc.sh
+
+docker exec file-connector /bin/bash -c \
+    'cd /opt/src; pip install -r test-requirements.txt -r requirements.txt'
+
+docker exec file-connector /bin/bash -c \
+    'cd /opt/src; flake8'
+
+export COVER_HTML_DIR=/opt/src/.coverhtml
+docker exec file-connector /bin/bash -c "mkdir -p $COVER_HTML_DIR; \
+    cd /opt/src; \
+    nosetests --with-coverage --cover-branches \
+    --cover-package=file_connector --cover-erase --cover-html \
+    --cover-html-dir=$COVER_HTML_DIR test/unit"
+
