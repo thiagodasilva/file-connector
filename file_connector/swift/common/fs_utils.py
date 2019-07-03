@@ -14,10 +14,11 @@
 # limitations under the License.
 
 import logging
-import os
 import errno
-import stat
+import os
 import random
+import shutil
+import stat
 import time
 import xattr
 from collections import defaultdict
@@ -280,6 +281,9 @@ def do_unlink(path, log=True):
             logging.warn("fs_utils: os.unlink failed on non-existent path: %s",
                          path)
 
+
+def do_rmtree(path):
+    shutil.rmtree(path)
 
 def do_rename(old_path, new_path):
     try:

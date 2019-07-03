@@ -948,13 +948,19 @@ class TestDiskFile(unittest.TestCase):
         os.makedirs(the_path)
         with open(the_file, "wb") as fd:
             fd.write("1234")
-        gdf = _get_diskfile(self.mgr, "vol0", "p57", "ufo47", "bar", "z")
-        assert gdf._obj == "z"
-        assert gdf._data_file == the_file
-        later = float(gdf.read_metadata()['X-Timestamp']) + 1
-        gdf.delete(normalize_timestamp(later))
-        assert os.path.isdir(gdf._put_datadir)
-        assert not os.path.exists(os.path.join(gdf._put_datadir, gdf._obj))
+
+        _mock_do_rmtree = Mock()  # Should be called
+        with patch("file_connector.swift.common.utils.do_rmtree",
+                   _mock_do_rmtree):
+            gdf = _get_diskfile(self.mgr, "vol0", "p57", "ufo47", "bar", "z")
+            self.assertEquals(gdf._obj, "z")
+            self.assertEquals(gdf._data_file, the_file)
+            later = float(gdf.read_metadata()['X-Timestamp']) + 1
+            gdf.delete(normalize_timestamp(later))
+            self.assertTrue(os.path.isdir(gdf._put_datadir))
+            self.assertFalse(
+                os.path.exists(os.path.join(gdf._put_datadir, gdf._obj)))
+        self.assertTrue(_mock_do_rmtree.called)
 
     def test_delete_same_timestamp(self):
         the_path = os.path.join(self.td, "vol0", "bar")
@@ -976,17 +982,22 @@ class TestDiskFile(unittest.TestCase):
         os.makedirs(the_path)
         with open(the_file, "wb") as fd:
             fd.write("1234")
-        gdf = _get_diskfile(self.mgr, "vol0", "p57", "ufo47", "bar", "z")
-        assert gdf._obj == "z"
-        assert gdf._data_file == the_file
-        later = float(gdf.read_metadata()['X-Timestamp']) + 1
+        _mock_do_rmtree = Mock()  # Should be called
+        with patch("file_connector.swift.common.utils.do_rmtree",
+                   _mock_do_rmtree):
+            gdf = _get_diskfile(self.mgr, "vol0", "p57", "ufo47", "bar", "z")
+            self.assertEquals(gdf._obj, "z")
+            self.assertEquals(gdf._data_file, the_file)
+            later = float(gdf.read_metadata()['X-Timestamp']) + 1
 
-        # Handle the case the file is not in the directory listing.
-        os.unlink(the_file)
+            # Handle the case the file is not in the directory listing.
+            os.unlink(the_file)
 
-        gdf.delete(normalize_timestamp(later))
-        assert os.path.isdir(gdf._put_datadir)
-        assert not os.path.exists(os.path.join(gdf._put_datadir, gdf._obj))
+            gdf.delete(normalize_timestamp(later))
+            self.assertTrue(os.path.isdir(gdf._put_datadir))
+            self.assertFalse(
+                os.path.exists(os.path.join(gdf._put_datadir, gdf._obj)))
+        self.assertTrue(_mock_do_rmtree.called)
 
     def test_delete_file_unlink_error(self):
         the_path = os.path.join(self.td, "vol0", "bar")
@@ -1025,12 +1036,18 @@ class TestDiskFile(unittest.TestCase):
         the_path = os.path.join(self.td, "vol0", "bar")
         the_dir = os.path.join(the_path, "d")
         os.makedirs(the_dir)
-        gdf = _get_diskfile(self.mgr, "vol0", "p57", "ufo47", "bar", "d")
-        assert gdf._data_file == the_dir
-        later = float(gdf.read_metadata()['X-Timestamp']) + 1
-        gdf.delete(normalize_timestamp(later))
-        assert os.path.isdir(gdf._put_datadir)
-        assert not os.path.exists(os.path.join(gdf._put_datadir, gdf._obj))
+
+        _mock_do_rmtree = Mock()  # Should be called
+        with patch("file_connector.swift.common.utils.do_rmtree",
+                   _mock_do_rmtree):
+            gdf = _get_diskfile(self.mgr, "vol0", "p57", "ufo47", "bar", "d")
+            self.assertEquals(gdf._data_file, the_dir)
+            later = float(gdf.read_metadata()['X-Timestamp']) + 1
+            gdf.delete(normalize_timestamp(later))
+            self.assertTrue(os.path.isdir(gdf._put_datadir))
+            self.assertFalse(
+                os.path.exists(os.path.join(gdf._put_datadir, gdf._obj)))
+        self.assertTrue(_mock_do_rmtree.called)
 
     def test_create(self):
         gdf = _get_diskfile(self.mgr, "vol0", "p57", "ufo47", "bar", "dir/z")

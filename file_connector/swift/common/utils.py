@@ -37,7 +37,7 @@ from swift.common.db import native_str_keys
 from file_connector.swift.common.fs_utils import do_getctime, do_getmtime, do_stat, \
     do_rmdir, do_log_rl, get_filename_from_fd, do_open, do_getsize, \
     do_getxattr, do_setxattr, do_removexattr, do_read, do_close, do_dup, \
-    do_lseek, do_fstat, mkdirs, do_rename
+    do_lseek, do_fstat, mkdirs, do_rename, do_rmtree
 
 try:
     import scandir
@@ -859,6 +859,9 @@ class MetadataPersistence(object):
         rmd = self.restore_metadata(acc_path, metadata, {})
         return rmd
 
+    def delete_metadata(self):
+        raise NotImplementedError()
+
 
 class JsonMetadataPersistence(MetadataPersistence):
     def __init__(self, dev_path):
@@ -951,6 +954,15 @@ class JsonMetadataPersistence(MetadataPersistence):
             path, fd=None, stats=stats, existing_meta=existing_meta,
             calculate_etag=calculate_etag)
 
+    def delete_metadata(self, path):
+        meta_dir_path, meta_file_path = self._get_metadata_dir(path)
+        try:
+            do_rmtree(meta_dir_path)
+        except OSError as err:
+            raise FileConnectorFileSystemOSError(
+                err.errno, "%s, do_rmtree('%s')" % (
+                    err.strerror, meta_dir_path))
+
 
 class XattrMetadataPersistence(MetadataPersistence):
     def __init__(self, dev_path):
@@ -1034,6 +1046,10 @@ class XattrMetadataPersistence(MetadataPersistence):
                 raise FileConnectorFileSystemIOError(
                     err.errno, 'removexattr("%s", %s)' % (path_or_fd, key))
             key += 1
+
+    def delete_metadata(self):
+        # do nothing
+        pass
 
 
 def get_metadata_persistence(dev_path, mode=None):
